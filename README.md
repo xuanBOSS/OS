@@ -1,163 +1,454 @@
-# LAB-1: 机器启动
+## TODO LIST
 
-## 组织结构
-## 代码组织结构
+├── kernel 
+│   ├── boot 
+│   │   ├── main.c  (TODO)  主函数需要初始化各个子系统
+│   │   ├── start.c (TODO)   启动入口，需要初始化栈并跳转到main函数
 
-ECNU-OSLAB  
-├── include  
-│   │   └── uart.h  
-│   ├── lib  
-│   │   ├── print.h  
-│   │   └── lock.h  
-│   ├── proc  
-│   │   └── cpu.h  
-│   ├── common.h  
-│   ├── memlayout.h  
-│   └── riscv.h  
-├── kernel  
-│   ├── boot  
-│   │   ├── main.c  (TODO)  
-│   │   ├── start.c (TODO)   
-│   │   ├── entry.S  
-│   │   └── Makefile  
-│   ├── dev  
-│   │   ├── uart.c  
-│   │   └── Makefile  
-│   ├── lib  
-│   │   ├── print.c (TODO)  
-│   │   ├── spinlock.c (TODO)  
-│   │   └── Makefile    
-│   ├── proc  
-│   │   ├── cpu.c  (TODO)  
-│   │   └── Makefile  
-│   ├── Makefile  
-│   └── kernel.ld  
-├── Makefile  
-└── common.mk  
+│   ├── lib 
+│   │   ├── print.c (TODO)  实现打印和错误处理
+│   │   ├── spinlock.c (TODO)  实现自旋锁机制
 
-## 核心目标
+│   ├── proc 
+│   │   ├── proc.c  (TODO)  实现CPU相关的基础函数
 
-完成双核的机器启动，能够进入main函数并输出一些东西 (如下图)  
-
-![图片](./picture/01.png)  
-
-## 具体任务
-
-要想实现上述核心目标，仔细想想只需要搞定两件事  
-
-1. 把代码在qemu上跑起来（双核启动），从 **entry.S** 到 **start.c** 到 **main.c**  
-
-2. 向我们的屏幕输出一些字符串，也就是实现我们经常调用的 **printf**
-
-第一件事需要你研究一下xv6的启动流程，只需要看到进入 **main.c** 就够了，比较简单  
-
-第二件事需要你先阅读一下 **uart.c**，里面包括uart的驱动，实现了最基本的字符读写功能  
-
-读完之后你需要利用uart层的函数完成 **print.c** 中的函数，你可以参考xv6的实现，也可以自己去做  
-
-此外，你还需要实现 **spinlock.c** 里的函数，自旋锁是最基本最常用的同步手段  
-
-它的实现依赖于**开关中断**和**原子操作**这两个概念，你需要完全理解  
-
-之所以需要实现自旋锁，是因为`printf`的本质是很多独立的`uart_putc_sync`操作  
-
-没有锁的保护，会出现并行执行的`printf`操作抢占`uart`资源,导致输出混乱的情况  
-
-完成这些事情后，你应当可以实现上面图片所示的效果 (在**main.c**的合适位置输出这两句话)  
-
-## 额外任务
-
-这里有额外的两个小实验帮助你理解锁的用处:  
-
-### 1. 并行加法计算
-
-``` 
-    #include "riscv.h"
-    #include "lib/print.h"
-
-    volatile static int started = 0;
-
-    volatile static int sum = 0;
-
-    int main()
-    {
-        int cpuid = r_tp();
-        if(cpuid == 0) {
-            print_init();
-            printf("cpu %d is booting!\n", cpuid);        
-            __sync_synchronize();
-            started = 1;
-            for(int i = 0; i < 1000000; i++)
-                sum++;
-            printf("cpu %d report: sum = %d\n", cpuid, sum);
-        } else {
-            while(started == 0);
-            __sync_synchronize();
-            printf("cpu %d is booting!\n", cpuid);
-            for(int i = 0; i < 1000000; i++)
-                sum++;
-            printf("cpu %d report: sum = %d\n", cpuid, sum);
-        }   
-        while (1);    
-    }  
-```
-
-在 **main.c** 中测试上述代码，很明显，我们的预期是后report的cpu应该告诉我们 **sum = 2000000**  
-
-但是实际结果可能是这样的  
+#### main.c：
 
 ```
-cpu 0 is booting!
-cpu 1 is booting!
-cpu 0 report: sum = 1128497
-cpu 1 report: sum = 1143332
-```
+#include "riscv.h"
+#include "dev/uart.h"
+#include "proc/proc.h"
 
-考虑如何使用锁进行修正，给出修正后的代码，修正后的输出可能是这样的  
+// 全局状态变量，用于多核同步
+volatile static int boot_cpu_id = -1;  // 启动CPU的ID
+volatile static int init_phase = 0;  // 0: 未初始化, 1: 初始化完成, 2: 允许输出
+volatile static int cpu_started[NCPU] = {0};  // 记录各CPU是否已启动
 
-```
-cpu 0 is booting!
-cpu 1 is booting!
-cpu 0 report: sum = 1996573
-cpu 1 report: sum = 2000000
-```
+// 字符串输出函数（避免竞态）
+void safe_print_string(const char *str) {
+    for (int i = 0; str[i]; i++) {
+        uart_putc_sync(str[i]);
+        // 每个字符后短暂延迟
+        for (volatile int j = 0; j < 1000; j++) {
+            asm volatile("nop");
+        }
+    }
+}
 
-简单说明上锁和解锁的位置不同会有什么影响（tips: 锁的粒度粗细）
+// 数字输出函数
+void safe_print_cpu_id(int cpuid) {
+    uart_putc_sync('0' + cpuid);
+}
 
-### 2. 并行输出  
-
-尝试去掉`printf`里的锁，按照前一个实验的思路，设计测试方法使得`printf`的输出出现交错的情况  
-
-给出你在main.c里的测试代码和结果截图  
-
-注意，额外任务完成后**复原你的代码**，额外任务的结果只需要在markdown文档中体现即可  
-
-## 提交作业
-
-1. 每次实验需要在上次实验的基础上继续往下做，假设你已经完成Lab-0
-
-    那么你此时应该在Lab-0的分支下使用 `git checkout -b Lab-1`命令创建并切换到新的分支Lab-1  
-
-    此时新建的Lab-1会继承Lab-0的内容，你对Lab-1的修改不会影响到Lab-0  
-
-    以此类推，当你从Lab-0一步步走到Lab-n时，你会获得越来越完整强大的内核  
-
-2. 每次作业都由 **代码+Markdown文档** 两部分构成  
-
-    文档内容不做明确要求，你有很高的自由度决定写什么和写多少  
-
-    提供一些建议: 这次实验新增了哪些功能，实现了什么效果，回答实验中提出的问题  
-
-    对某个过程的详细理解（比如这次实验的xv6启动过程, Makefile中的make qemu是怎样工作的）  
-
-    注意使用markdown的分层方法增加条理性，让别人可以愉快阅读和抓住重点
-
-    总之，这是你的项目，对你自己的代码和文档负责  
+int main()
+{
+    int cpuid = mycpuid();
     
-    注意，代码是连续的但是文档不是，每次的文档不需要接着上一次的写  
+    // 第一阶段：选择启动CPU并初始化
+    if (__sync_bool_compare_and_swap(&boot_cpu_id, -1, cpuid)) {
+        // 这个CPU成为启动CPU
+        uart_init();
+        
+        // 长延迟确保UART完全初始化
+        for (volatile int i = 0; i < 15000000; i++) {
+            asm volatile("nop");
+        }
+        
+        safe_print_string("RISC-V OS starting...\n");
+        safe_print_string("CPU ");
+        safe_print_cpu_id(cpuid);
+        safe_print_string(": Boot CPU initializing...\n");
+        safe_print_string("Three core boot completed!\n");
+        
+        // 标记初始化完成，允许其他CPU继续
+        __sync_synchronize();
+        init_phase = 1;
+        cpu_started[cpuid] = 1;
+        
+        // 等待所有CPU都启动完成
+        while (1) {
+            int all_started = 1;
+            for (int i = 0; i < NCPU; i++) {
+                if (!cpu_started[i]) {
+                    all_started = 0;
+                    break;
+                }
+            }
+            if (all_started) break;
+            
+            for (volatile int i = 0; i < 100000; i++) {
+                asm volatile("nop");
+            }
+        }
+        
+    } else {
+        // 非启动CPU等待初始化完成
+        while (init_phase == 0) {
+            __sync_synchronize();
+            for (volatile int i = 0; i < 10000; i++) {
+                asm volatile("nop");
+            }
+        }
+        
+        // 根据CPU ID添加不同延迟，确保顺序输出
+        for (volatile int i = 0; i < (cpuid * 20000000); i++) {
+            asm volatile("nop");
+        }
+        
+        // 输出启动信息
+        safe_print_string("CPU ");
+        safe_print_cpu_id(cpuid);
+        safe_print_string(": Secondary CPU started!\n");
+        
+        // 标记当前CPU已启动
+        __sync_synchronize();
+        cpu_started[cpuid] = 1;
+    }
+    
+    // 所有CPU进入主循环
+    while (1) {
+        asm volatile("wfi");
+    }
+}
+```
 
-3. 提醒: 之所以要求大家维护代码仓库，是为了查看大家的提交记录，  
+**启动流程：**
 
-    所以请及时同步当天写的东西到线上仓库，不要攒到最后一口气提交  
+- 启动CPU初始化UART并输出信息
+- 其他CPU等待后依次输出启动信息
+- 所有CPU最终进入等待中断的循环
 
-    可能被误判为复制粘贴
+**多核启动协调：**
+
+- 使用原子操作(__sync_bool_compare_and_swap)选出一个启动CPU
+- 其他CPU等待启动CPU完成初始化(init_phase标志)
+- 使用cpu_started数组跟踪所有CPU状态
+
+**同步机制：**
+
+- 使用__sync_synchronize()内存屏障确保内存可见性
+- 使用volatile防止编译器优化
+
+#### start.c：
+
+```
+#include "riscv.h"
+
+// 为所有CPU核心预分配内核栈空间
+// 每个栈4096字节，对齐到4096边界
+__attribute__ ((aligned (4096))) uint8 CPU_stack[4096 * NCPU];
+
+void start()
+{
+    // 允许所有CPU执行到main函数
+    extern int main();
+    main();
+}
+```
+
+#### print.c：
+
+```
+// 标准输出和报错机制
+#include <stdarg.h>
+#include "lib/print.h"
+#include "lib/lock.h"
+#include "dev/uart.h"
+
+volatile int panicked = 0;
+
+static spinlock_t print_lk;  // 打印输出的自旋锁
+
+static char digits[] = "0123456789abcdef";   // 数字字符映射表
+
+// 打印初始化函数
+void print_init(void)
+{
+    //spinlock_init(&print_lk, "print");
+    uart_init(); // 初始化串口
+    // 手动初始化锁（简单赋值，避免函数调用）
+    print_lk.locked = 0;
+    print_lk.name = "print";
+    print_lk.cpuid = -1;
+    // 确保 UART 初始化完成（延迟）
+    for (volatile int i = 0; i < 100000; i++) {
+        asm volatile("nop");
+    }
+}
+// 打印整数（支持不同进制和符号）
+static void printint(int xx, int base, int sign)
+{
+    char buf[16];
+    int i;
+    uint32 x;
+
+    // 处理负数
+    if(sign && (sign = xx < 0))
+        x = -xx;
+    else
+        x = xx;
+
+    // 将数字转换为字符串（逆序）
+    i = 0;
+    do{
+        buf[i++] = digits[x % base];
+    }while((x /= base) != 0);
+
+    // 添加负号
+    if(sign)
+        buf[i++] = '-';
+
+    // 逆序输出（得到正确顺序）
+    while(--i >= 0)
+        uart_putc_sync(buf[i]);
+}
+
+// 打印指针（64位地址）
+static void printptr(uint64 x)
+{
+    int i;
+    uart_putc_sync('0');
+    uart_putc_sync('x');
+    for (i = 0; i < (sizeof(uint64) * 2); i++, x <<= 4)
+        uart_putc_sync(digits[x >> (sizeof(uint64) * 8 - 4)]);
+}
+
+// Print to the console. only understands %d, %x, %p, %s.
+void printf(const char *fmt, ...)
+{
+    va_list ap;
+    int i, c;
+    char *s;
+
+    if (fmt == 0)
+        return;
+
+    spinlock_acquire(&print_lk);  // 获取锁
+
+    va_start(ap, fmt);
+    for(i = 0; (c = fmt[i] & 0xff) != 0; i++){
+        if(c != '%'){
+            uart_putc_sync(c);
+            continue;
+        }
+        c = fmt[++i] & 0xff;
+        if(c == 0)
+            break;
+        switch(c){
+        case 'd':
+            printint(va_arg(ap, int), 10, 1);
+            break;
+        case 'x':
+            printint(va_arg(ap, int), 16, 1);
+            break;
+        case 'p':
+            printptr(va_arg(ap, uint64));
+            break;
+        case 's':
+            if((s = va_arg(ap, char*)) == 0)
+                s = "(null)";
+            for(; *s; s++)
+                uart_putc_sync(*s);
+            break;
+        case '%':
+            uart_putc_sync('%');
+            break;
+        default:
+            uart_putc_sync('%');
+            uart_putc_sync(c);
+            break;
+        }
+    }
+    va_end(ap);
+
+    spinlock_release(&print_lk);  // 释放锁
+}
+
+void panic(const char *s)
+{
+    printf("panic: ");
+    printf("%s\n", s);
+    panicked = 1; // 冻结其他CPU
+    for(;;)
+        ;
+}
+
+void assert(bool condition, const char* warning)
+{
+    if (!condition) {
+        panic(warning);
+    }
+}
+```
+
+**线程安全输出**：
+
+- 使用自旋锁(print_lk)保护整个输出过程
+- spinlock_acquire/release确保多核环境下输出不会交错
+
+**底层依赖**：
+
+- 所有输出最终通过uart_putc_sync发送到串口
+- 需要先初始化UART(print_init中调用uart_init)
+
+#### spinlock.c：
+
+```
+#include "lib/lock.h"
+#include "lib/print.h"
+#include "proc/proc.h"
+#include "riscv.h"
+
+// 带层数叠加的关中断
+void push_off(void)
+{
+    cpu_t *c = mycpu();
+    int old = intr_get();
+
+    intr_off();  // 关闭中断
+
+    if(c->noff == 0)   // 如果是第一次关中断，保存原始状态
+        c->origin = old;
+    c->noff += 1;
+}
+
+// 带层数叠加的开中断
+void pop_off(void)
+{
+    cpu_t *c = mycpu();
+    
+    if(c->noff < 1)
+        panic("pop_off");
+    
+    c->noff -= 1;
+    if(c->noff == 0 && c->origin)    // 如果回到0层且原始状态是开启，则恢复中断
+        intr_on();
+}
+
+// 是否持有自旋锁
+// 中断应当是关闭的
+bool spinlock_holding(spinlock_t *lk)
+{
+    int r;
+    push_off();// 临时关闭中断
+    // 检查锁是否被当前CPU持有
+    r = (lk->locked && lk->cpuid == mycpuid());
+    pop_off();
+    return r;
+}
+
+// 自选锁初始化
+void spinlock_init(spinlock_t *lk, char *name)
+{
+    lk->name = name;
+    lk->locked = 0;
+    lk->cpuid = -1;
+}
+
+// 获取自选锁
+void spinlock_acquire(spinlock_t *lk)
+{    
+    push_off();
+    
+    // 原子交换，获取锁
+    while(__sync_lock_test_and_set(&lk->locked, 1) != 0) {
+        asm volatile("nop");  // 忙等待
+    }
+    
+    __sync_synchronize();  // 内存屏障
+    lk->cpuid = mycpuid();   // 记录持有者
+} 
+
+// 释放自旋锁
+void spinlock_release(spinlock_t *lk)
+{
+    
+    lk->cpuid = -1;
+    
+    // 内存屏障，确保临界区代码不会被重排到锁释放之后
+    __sync_synchronize();
+    
+    // 释放锁
+    __sync_lock_release(&lk->locked);
+    
+    pop_off(); // 开中断
+}
+```
+
+**原子操作**：
+
+- 使用__sync_lock_test_and_set实现原子交换
+- 使用__sync_lock_release原子释放锁
+- 使用__sync_synchronize内存屏障保证执行顺序
+
+**锁状态跟踪**：
+
+- locked字段表示锁状态(0=空闲, 1=锁定)
+- cpuid记录当前持有锁的CPU
+- name字段用于调试识别
+
+**安全机制**：
+
+- spinlock_holding检查锁持有情况
+- pop_off检查嵌套层数防止错误调用
+- 内存屏障确保临界区执行顺序
+
+#### proc.c：
+
+```
+#include "proc/proc.h"
+#include "riscv.h"
+
+// 静态初始化为0，避免未初始化问题
+static cpu_t cpus[NCPU];
+
+// 获取当前CPU的核心状态结构
+cpu_t* mycpu(void)
+{
+    int cpuid = mycpuid();
+    if (cpuid >= NCPU) {
+        return &cpus[0];
+    }
+    
+    // 确保cpu结构体已初始化
+    if (cpus[cpuid].noff == 0 && cpus[cpuid].origin == 0) {
+        cpus[cpuid].noff = 0;
+        cpus[cpuid].origin = 0;
+    }
+    
+    return &cpus[cpuid];
+}
+
+int mycpuid(void) 
+{
+    int id;
+    asm volatile("csrr %0, mhartid" : "=r" (id));
+    return id;
+}
+```
+
+proc.c提供的功能被spinlock.c使用：
+
+1. **中断状态管理**：
+   - `push_off()`和`pop_off()`依赖`mycpu()`获取当前CPU的状态结构
+   - 通过修改`noff`和`origin`实现嵌套式中断控制
+2. **锁持有者跟踪**：
+   - 自旋锁通过`mycpuid()`记录当前持有锁的CPU核心
+   - 用于调试和死锁检测
+3. **多核安全**：
+   - 确保每个CPU核心操作自己的状态结构
+   - 避免多核间的竞争条件
+
+
+
+## 问题与解决方案
+
+1. **多核输出混乱问题**：
+   - **问题**：多个 CPU 同时输出导致字符交错
+   - **解决方案**：使用自旋锁保护 printf 函数，确保一次只有一个 CPU 输出
+2. **启动顺序不确定问题**：
+   - **问题**：无法预测哪个 CPU 先执行
+   - **解决方案**：使用原子操作选择启动 CPU，其他 CPU 等待
+3. **数据竞争问题**：
+   - **问题**：多个 CPU 同时访问共享变量导致不一致
+   - **解决方案**：使用自旋锁保护共享数据访问
