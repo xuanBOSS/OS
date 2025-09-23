@@ -20,6 +20,19 @@ typedef unsigned long long         reg;
 #define NULL ((void*)0)
 #endif
 
-#define NCPU 3
+#define NCPU 3  
+//单核 1
+//双核 2
+
+// 新增：页面大小定义
+#define PGSIZE 4096             // 页面大小：4KB
+#define PGSHIFT 12              // 页面位移：2^12 = 4096
+
+// 页面对齐宏
+#define PGROUNDUP(sz)   (((sz)+PGSIZE-1) & ~(PGSIZE-1))
+#define PGROUNDDOWN(a)  (((a)) & ~(PGSIZE-1))
+
+// 内核页面数量定义（可根据需要调整）
+#define KERNEL_PAGES 1024       // 内核保留1024个页面（4MB）
 
 #endif
