@@ -1,45 +1,53 @@
-OUTPUT_ARCH( "riscv" )
-ENTRY( _entry )
+/* kernel/kernel.ld */
+OUTPUT_ARCH(riscv)
+ENTRY(_start)
+
+BASE_ADDRESS = 0x80000000;
 
 SECTIONS
 {
-  /*
-   * ensure that entry.S / _entry is at 0x80000000,
-   * where qemu's -kernel jumps.
-   */
-  . = 0x80000000;
+    . = BASE_ADDRESS;
+    
+    kernel_start = .;
 
-  .text : {
-    kernel/entry.o(_entry)
-    *(.text .text.*)
-    . = ALIGN(0x1000);
-    _trampoline = .;
-    *(trampsec)
-    . = ALIGN(0x1000);
-    ASSERT(. - _trampoline == 0x1000, "error: trampoline larger than one page");
-    PROVIDE(etext = .);
-  }
+    .text : {
+        *(.text .text.*)
+        . = ALIGN(16);
+    }
+    
+    etext = .;
 
-  .rodata : {
-    . = ALIGN(16);
-    *(.srodata .srodata.*) /* do not need to distinguish this from .rodata */
-    . = ALIGN(16);
-    *(.rodata .rodata.*)
-  }
+    .rodata : {
+        *(.rodata .rodata.*)
+        . = ALIGN(16);
+    }
 
-  .data : {
-    . = ALIGN(16);
-    *(.sdata .sdata.*) /* do not need to distinguish this from .data */
-    . = ALIGN(16);
-    *(.data .data.*)
-  }
+    .data : {
+        *(.data .data.*)
+        . = ALIGN(16);
+    }
+    
+    edata = .;
 
-  .bss : {
-    . = ALIGN(16);
-    *(.sbss .sbss.*) /* do not need to distinguish this from .bss */
-    . = ALIGN(16);
-    *(.bss .bss.*)
-  }
+    .bss : {
+        . = ALIGN(16);
+        bss_start = .;
+        *(.sbss .sbss.*)
+        *(.bss .bss.*)
+        *(COMMON)
+        . = ALIGN(16);
+        bss_end = .;
+    }
 
-  PROVIDE(end = .);
+    . = ALIGN(4096);
+    stack_bottom = .;
+    . += 0x4000;        
+    stack_end = .;      
+
+    kernel_end = .;
+    end = .;            /* 添加end符号 */
+
+    /DISCARD/ : {
+        *(.eh_frame .note.GNU-stack)
+    }
 }
