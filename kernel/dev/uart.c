@@ -57,12 +57,17 @@ void uart_init(void)
 // 单个字符输出
 void uart_putc_sync(int c)
 {
-    // 等待 TX 空闲
-    while ((ReadReg(LSR) & LSR_TX_IDLE) == 0)
-        ;
+  push_off();
 
-    // 写入字符
-    WriteReg(THR, c);
+  while(panicked);
+
+  // 等待TX队列进入idle状态
+  while((ReadReg(LSR) & LSR_TX_IDLE) == 0);
+  
+  // 输出
+  WriteReg(THR, c);
+
+  pop_off();
 }
 
 // 单个字符输入
