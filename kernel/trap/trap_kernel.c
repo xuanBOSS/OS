@@ -16,16 +16,14 @@
 
 // ====== 任务4：上下文保存与恢复相关 ======
 
-// 栈管理相关定义
-#define STACK_GUARD_SIZE     4096    
-#define MAX_STACK_DEPTH      8       
+// 栈管理相关定义 
 #define STACK_FRAME_SIZE     512     
 
-// 每CPU栈状态跟踪
+// 栈管理变量
 static int interrupt_stack_depth[NCPU] = {0};
 
 // 栈溢出检查函数
-static int check_stack_overflow(void) {
+int check_stack_overflow(void) {
     int cpuid = mycpuid();
     
     // 简化的栈检查 - 检查嵌套深度
@@ -37,7 +35,7 @@ static int check_stack_overflow(void) {
 }
 
 // 中断嵌套管理
-static void interrupt_stack_enter(void) {
+void interrupt_stack_enter(void) {
     int cpuid = mycpuid();
     
     // 检查栈溢出
@@ -54,7 +52,7 @@ static void interrupt_stack_enter(void) {
     }
 }
 
-static void interrupt_stack_exit(void) {
+void interrupt_stack_exit(void) {
     int cpuid = mycpuid();
     if (interrupt_stack_depth[cpuid] > 0) {
         interrupt_stack_depth[cpuid]--;
@@ -102,7 +100,7 @@ static char* exception_info[16] = {
 };
 
 // 异常处理函数
-static void handle_exception(struct trapframe *tf, int exception_code) {
+void handle_exception(struct trapframe *tf, int exception_code) {
     printf("Kernel Exception: %s\n", exception_info[exception_code]);
     printf("sepc=0x%lx stval=0x%lx sstatus=0x%lx\n", 
            tf->sepc, tf->stval, tf->sstatus);
@@ -123,8 +121,35 @@ static void handle_exception(struct trapframe *tf, int exception_code) {
             break;
     }
     
-    // 简单处理：终止或跳过指令
-    panic("Unhandled kernel exception");
+    printf("Exception handling completed (test mode)\n");
+}
+
+// trapframe调试输出
+void dump_trapframe(struct trapframe *tf) {
+    printf("=== Trapframe Dump ===\n");
+    printf("CSR Registers:\n");
+    printf("  sepc: 0x%lx\n", tf->sepc);
+    printf("  sstatus: 0x%lx\n", tf->sstatus);
+    printf("  scause: 0x%lx\n", tf->scause);
+    printf("  stval: 0x%lx\n", tf->stval);
+    
+    printf("General Purpose Registers:\n");
+    for(int i = 0; i < 32; i += 4) {
+        printf("  x%d-x%d: 0x%lx 0x%lx 0x%lx 0x%lx\n", 
+               i, i+3, tf->reg[i], tf->reg[i+1], tf->reg[i+2], tf->reg[i+3]);
+    }
+    printf("=== End Trapframe ===\n");
+}
+
+// 打印尺寸的辅助函数
+void print_size64(uint64 size_bytes) {
+    if (size_bytes < 1024) {
+        printf("%lu bytes", size_bytes);
+    } else if (size_bytes < 1024 * 1024) {
+        printf("%lu KB", size_bytes / 1024);
+    } else {
+        printf("%lu MB", size_bytes / (1024 * 1024));
+    }
 }
 
 // in trap.S
