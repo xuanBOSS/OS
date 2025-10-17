@@ -46,7 +46,7 @@ void disable_interrupt_nesting(void);                   // 禁止中断嵌套
 
 // ====== 中断统计接口 ======
 uint64 get_interrupt_count(int irq);                    // 获取中断次数
-void print_interrupt_stats(void);                       // 打印中断统计信息
+void print_interrupt_stats_simple(void);                       // 打印中断统计信息
 
 // ====== 内部处理函数 ======
 void handle_interrupt(int irq);                         // 通用中断处理
@@ -57,6 +57,18 @@ void fast_interrupt_handler(int irq);                   // 快速中断处理
 int register_shared_interrupt(int irq, interrupt_handler_t handler, 
                              const char *name, int priority);
 void handle_shared_interrupt(int irq);
+
+// ====== 共享中断扩展接口 ======
+int unregister_shared_interrupt(int irq, interrupt_handler_t handler);
+int get_shared_interrupt_count(int irq);
+int is_shared_interrupt(int irq);
+int get_interrupt_priority(int irq);
+int is_interrupt_enabled(int irq);
+void reset_interrupt_stats(int irq);
+void reset_all_interrupt_stats(void);
+void get_interrupt_framework_status(void);
+void test_interrupt_performance(int irq, int iterations);
+void verify_interrupt_framework_integrity(void);
 
 // ====== 批量操作接口 ======
 int register_interrupt_batch(interrupt_config_t *configs, int count);
@@ -77,5 +89,10 @@ void print_interrupt_stack_info(void);
 
 // 中断处理入口（使用trapframe）
 void kerneltrap(struct trapframe *tf);
+
+
+void interrupt_system_health_check(void);
+int register_interrupt_with_validation(int irq, interrupt_handler_t handler, const char *name);
+
 
 #endif

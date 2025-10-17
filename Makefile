@@ -2,7 +2,7 @@ include common.mk
 
 KERN = kernel
 KERNEL_ELF = kernel-qemu
-CPUNUM = 1
+CPUNUM = 3
 FS_IMG = none
 
 .PHONY: clean $(KERN)

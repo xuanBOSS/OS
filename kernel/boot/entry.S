@@ -4,6 +4,9 @@
 
 .section .text
 _entry:
+        # 设置tp寄存器为CPU ID (mhartid)
+        csrr tp, mhartid
+        
         # CPU_stack 定义于start.c中
         # sp = CPU_stack + ((hartid + 1) * 4096)
         # 将sp置于当前CPU的内核栈的栈顶
@@ -17,4 +20,3 @@ _entry:
         call start            # 跳转到C代码
 spin:
         j spin
-        
