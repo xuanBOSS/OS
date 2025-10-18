@@ -2,8 +2,8 @@
 #ifndef __COMMON_H__
 #define __COMMON_H__
 #include <stdbool.h>
-// 类型定义
 
+// 类型定义
 typedef char                   int8;
 typedef short                  int16;
 typedef int                    int32;
@@ -13,8 +13,13 @@ typedef unsigned short         uint16;
 typedef unsigned int           uint32;
 typedef unsigned long long     uint64;
 
-typedef unsigned long long         reg; 
-//typedef enum {false = 0, true = 1} bool;
+typedef unsigned long long     reg; 
+
+// 添加 size_t 类型定义
+#ifndef _SIZE_T_DEFINED
+#define _SIZE_T_DEFINED
+typedef unsigned long size_t;
+#endif
 
 #ifndef NULL
 #define NULL ((void*)0)

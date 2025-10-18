@@ -9,6 +9,7 @@
 #include "trap/trap_framework.h"
 #include "trap/trapframe.h"
 #include "dev/timer_sched.h"
+#include "trap/exception.h"
 
 // 添加缺少的常量定义
 #ifndef SCAUSE_INTERRUPT
@@ -104,9 +105,25 @@ static char* exception_info[16] = {
 
 // 异常处理函数
 void handle_exception(struct trapframe *tf, int exception_code) {
-    printf("Kernel Exception: %s\n", exception_info[exception_code]);
+    // 添加更多调试信息
+    printf("=== ENTER handle_exception ===\n");
+    printf("Exception code: %d\n", exception_code);
+    printf("Exception name: %s\n", exception_info[exception_code]);
     printf("sepc=0x%lx stval=0x%lx sstatus=0x%lx\n", 
            tf->sepc, tf->stval, tf->sstatus);
+    
+    // 特别处理断点异常
+    if (exception_code == 3) {  // 断点异常
+        printf("=== BREAKPOINT EXCEPTION DETECTED ===\n");
+        printf("Before: sepc = 0x%lx\n", tf->sepc);
+        
+        // 跳过 ebreak 指令
+        tf->sepc += 4;
+        
+        printf("After: sepc = 0x%lx\n", tf->sepc);
+        printf("=== BREAKPOINT HANDLED, RETURNING ===\n");
+        return;
+    }
     
     // 基本的异常处理
     switch(exception_code) {
@@ -124,7 +141,7 @@ void handle_exception(struct trapframe *tf, int exception_code) {
             break;
     }
     
-    printf("Exception handling completed (test mode)\n");
+    printf("=== EXIT handle_exception ===\n");
 }
 
 // trapframe调试输出
@@ -165,14 +182,13 @@ void trap_kernel_init()
 {
     printf("Initializing trap system...\n");
     
-    // 初始化PLIC
+    // 原有初始化
     plic_init();
-    
-    // 初始化定时器
     timer_init();
-    
-    // 创建系统时钟
     timer_create();
+    
+    // 添加新的异常处理初始化
+    exception_init();
     
     printf("Trap system initialized successfully\n");
 }
@@ -183,12 +199,13 @@ void trap_kernel_inithart()
     // 设置内核中断向量
     w_stvec((uint64)kernelvec);
     
-    // === 强制多次设置SIE ===
+    printf("CPU %d: kernelvec address = 0x%lx\n", mycpuid(), (uint64)kernelvec);
+    printf("CPU %d: stvec set to: 0x%lx\n", mycpuid(), r_stvec());
+    
     int cpuid = mycpuid();
     
     printf("CPU %d: Setting SIE register...\n", cpuid);
     
-    // 尝试设置多种中断
     uint64 sie_value = SIE_SSIE | SIE_STIE | SIE_SEIE;
     w_sie(sie_value);
     
@@ -196,20 +213,13 @@ void trap_kernel_inithart()
     printf("CPU %d: After w_sie(0x%lx), read back: 0x%lx\n", 
            cpuid, sie_value, sie_read);
     
-    if (sie_read != sie_value) {
-        printf("CPU %d: ✗ SIE write failed!\n", cpuid);
-    } else {
-        printf("CPU %d: ✓ SIE successfully set\n", cpuid);
-    }
-    
-    // === 关键修复：确保 SPP 位正确 ===
+    // 设置 SPP 为 S-mode
     uint64 sstatus = r_sstatus();
     printf("CPU %d: Current sstatus: 0x%lx (SPP: %s)\n", 
            cpuid, sstatus, (sstatus & SSTATUS_SPP) ? "S-mode" : "U-mode");
     
-    // 强制设置 SPP 为 S-mode
-    sstatus |= SSTATUS_SPP;  // 设置 SPP 位
-    sstatus |= SSTATUS_SIE;  // 确保 SIE 位也设置
+    sstatus |= SSTATUS_SPP;
+    sstatus |= SSTATUS_SIE;
     w_sstatus(sstatus);
     
     uint64 sstatus_after = r_sstatus();
