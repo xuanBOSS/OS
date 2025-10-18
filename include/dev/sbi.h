@@ -3,7 +3,10 @@
 
 #include "common.h"
 
-// SBI接口声明（兼容性）
+// SBI接口声明
 void sbi_set_timer(uint64 stime);
+void sbi_console_putchar(int ch);
+int sbi_console_getchar(void);
+void sbi_shutdown(void);
 
 #endif

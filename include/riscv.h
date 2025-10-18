@@ -73,6 +73,11 @@ static inline void w_sip(uint64 x)
 #define SIE_STIE (1L << 5) // timer
 #define SIE_SSIE (1L << 1) // software
 
+// SIP (Supervisor Interrupt Pending) 位定义
+#define SIP_SSIP (1L << 1)  // S模式软件中断挂起
+#define SIP_STIP (1L << 5)  // S模式时钟中断挂起  ← 添加这个
+#define SIP_SEIP (1L << 9)  // S模式外部中断挂起
+
 static inline uint64 r_sie()
 {
   uint64 x;
@@ -89,6 +94,7 @@ static inline void w_sie(uint64 x)
 #define MIE_MEIE (1L << 11) // external
 #define MIE_MTIE (1L << 7)  // timer
 #define MIE_MSIE (1L << 3)  // software
+#define MCOUNTEREN_TM (1L << 1)  // Time counter
 
 static inline uint64 r_mie()
 {
@@ -315,3 +321,24 @@ static inline void sfence_vma()
 // Sv39, to avoid having to sign-extend virtual addresses
 // that have the high bit set.
 #define MAXVA (1L << (9 + 9 + 9 + 12 - 1))
+
+// M模式寄存器
+#define MSTATUS_MPP_MASK (3L << 11)
+#define MSTATUS_MPP_M (3L << 11)
+#define MSTATUS_MPP_S (1L << 11)
+#define MSTATUS_MPP_U (0L << 11)
+
+// M模式中断使能位
+#define MIE_MEIE (1L << 11)  // M模式外部中断
+#define MIE_MTIE (1L << 7)   // M模式时钟中断
+#define MIE_MSIE (1L << 3)   // M模式软件中断
+#define MIE_STIE (1L << 5)   // S模式时钟中断
+
+// 添加M模式寄存器访问函数
+
+static inline uint64 r_menvcfg() { uint64 x; asm volatile("csrr %0, menvcfg" : "=r" (x)); return x; }
+static inline void w_menvcfg(uint64 x) { asm volatile("csrw menvcfg, %0" : : "r" (x)); }
+
+static inline uint64 r_stimecmp() { uint64 x; asm volatile("csrr %0, stimecmp" : "=r" (x)); return x; }
+static inline void w_stimecmp(uint64 x) { asm volatile("csrw stimecmp, %0" : : "r" (x)); }
+

@@ -8,13 +8,15 @@
 #include "riscv.h"
 #include "trap/trap_framework.h"
 #include "trap/trapframe.h"
+#include "dev/timer_sched.h"
 
 // 添加缺少的常量定义
 #ifndef SCAUSE_INTERRUPT
 #define SCAUSE_INTERRUPT (1L << 63)
 #endif
 
-// ====== 任务4：上下文保存与恢复相关 ======
+extern void kernelvec(void);  // 声明汇编中的kernelvec函数
+void clockintr(void);
 
 // 栈管理相关定义 
 #define STACK_FRAME_SIZE     512     
@@ -60,6 +62,7 @@ void interrupt_stack_exit(void) {
 }
 
 // 中断信息
+/*
 static char* interrupt_info[16] = {
     "U-mode software interrupt",      // 0
     "S-mode software interrupt",      // 1
@@ -77,7 +80,7 @@ static char* interrupt_info[16] = {
     "reserved-5",                     // 13
     "reserved-6",                     // 14
     "reserved-7",                     // 15
-};
+};*/
 
 // 异常信息
 static char* exception_info[16] = {
@@ -177,20 +180,44 @@ void trap_kernel_init()
 // 各个核心trap初始化
 void trap_kernel_inithart()
 {
+    // 设置内核中断向量
+    w_stvec((uint64)kernelvec);
+    
+    // === 强制多次设置SIE ===
     int cpuid = mycpuid();
-    printf("CPU %d: initializing trap handler\n", cpuid);
     
-    // 设置S模式中断向量
-    w_stvec((uint64)kernel_vector);
+    printf("CPU %d: Setting SIE register...\n", cpuid);
     
-    // 初始化PLIC for this hart
-    plic_inithart();
+    // 尝试设置多种中断
+    uint64 sie_value = SIE_SSIE | SIE_STIE | SIE_SEIE;
+    w_sie(sie_value);
     
-    // 使能S模式外部中断和软件中断
-    w_sie(r_sie() | SIE_SEIE | SIE_SSIE);
+    uint64 sie_read = r_sie();
+    printf("CPU %d: After w_sie(0x%lx), read back: 0x%lx\n", 
+           cpuid, sie_value, sie_read);
     
-    // 开启中断
-    intr_on();
+    if (sie_read != sie_value) {
+        printf("CPU %d: ✗ SIE write failed!\n", cpuid);
+    } else {
+        printf("CPU %d: ✓ SIE successfully set\n", cpuid);
+    }
+    
+    // === 关键修复：确保 SPP 位正确 ===
+    uint64 sstatus = r_sstatus();
+    printf("CPU %d: Current sstatus: 0x%lx (SPP: %s)\n", 
+           cpuid, sstatus, (sstatus & SSTATUS_SPP) ? "S-mode" : "U-mode");
+    
+    // 强制设置 SPP 为 S-mode
+    sstatus |= SSTATUS_SPP;  // 设置 SPP 位
+    sstatus |= SSTATUS_SIE;  // 确保 SIE 位也设置
+    w_sstatus(sstatus);
+    
+    uint64 sstatus_after = r_sstatus();
+    printf("CPU %d: After SPP fix: 0x%lx (SPP: %s)\n", 
+           cpuid, sstatus_after, (sstatus_after & SSTATUS_SPP) ? "S-mode" : "U-mode");
+    
+    printf("CPU %d: Final status - sie=0x%lx, sstatus=0x%lx\n", 
+           cpuid, r_sie(), sstatus_after);
     
     printf("CPU %d: trap handler initialized\n", cpuid);
 }
@@ -217,61 +244,76 @@ void external_interrupt_handler()
 }
 
 // 时钟中断处理 (基于CLINT)
-void timer_interrupt_handler()
+void timer_interrupt_handler_original()
 {
     // S模式软件中断由M模式timer_vector触发，清除标志
     w_sip(r_sip() & ~SIP_SSIP);
     
     // 1. 更新系统时间
     timer_update();
-
 }
 
-// ====== 任务4：新的trapframe处理入口 ======
+// 新的集成时钟中断处理函数
+void timer_interrupt_handler_integrated()
+{
+    // 调用原有的处理
+    timer_interrupt_handler_original();
+    
+    // 2. 新增：调用调度器的时钟处理
+    timer_sched_interrupt_handler();  // 重命名以避免冲突
+}
 
-// 使用trapframe的新中断处理入口
+int devintr_check(void) {
+    uint64 scause = r_scause();
+    
+    if (scause == 0x8000000000000005L) {
+        printf("Timer interrupt detected!\n");
+        clockintr();
+        return 2;
+    } else if (scause == 0x8000000000000009L) {
+        printf("External interrupt detected!\n");
+        return 1;
+    } else if (scause == 0x8000000000000001L) {
+        printf("Software interrupt detected!\n");
+        return 1;
+    }
+    
+    return 0;
+}
+
 void kerneltrap(struct trapframe *tf)
 {
-    __attribute__((unused)) uint64 sepc = tf->sepc;           
+    uint64 sepc = tf->sepc;           
     uint64 sstatus = tf->sstatus;    
     uint64 scause = tf->scause;      
-    __attribute__((unused)) uint64 stval = tf->stval;           
 
-    // 基本检查
+    // 添加调试输出
+    printf(">>> KERNELTRAP CALLED! <<<\n");
+    printf("    scause: 0x%lx\n", scause);
+    printf("    sepc: 0x%lx\n", sepc);
+    printf("    CPU: %d\n", mycpuid());
+
     assert(sstatus & SSTATUS_SPP, "kerneltrap: not from s-mode");
     assert(intr_get() == 0, "kerneltrap: interrupt enabled");
 
-    // 栈管理 - 任务4新增
     interrupt_stack_enter();
-
-    int trap_id = scause & 0xf; 
 
     // 判断是中断还是异常
     if(scause & SCAUSE_INTERRUPT) {
-        // 中断处理 - 使用我们的框架
-        printf("Kernel Interrupt: %s\n", interrupt_info[trap_id]);
-        
-        switch(trap_id) {
-            case 1: // S-mode软件中断（时钟中断）
-                timer_interrupt_handler();  // 使用新的处理函数
-                break;
-            case 9: // S-mode外部中断
-                handle_interrupt(IRQ_S_EXT);
-                break;
-            default:
-                printf("Unknown interrupt: scause=0x%lx\n", scause);
-                break;
+        printf("    -> Processing interrupt\n");
+        int which_dev = devintr_check();
+        if (which_dev == 0) {
+            printf("    -> Unknown interrupt: 0x%lx\n", scause);
+        } else {
+            printf("    -> Interrupt handled, type: %d\n", which_dev);
         }
     } else {
-        // 异常处理 - 任务4新增
-        handle_exception(tf, trap_id);
+        printf("    -> Processing exception\n");
+        handle_exception(tf, scause & 0xf);
     }
     
-    // 栈管理 - 任务4新增
     interrupt_stack_exit();
-    
-    // trapframe中的sepc和sstatus可能被修改，无需手动恢复
-    // 汇编代码会从trapframe恢复所有状态
+    printf(">>> KERNELTRAP COMPLETE <<<\n");
 }
 
 // 在kernel_vector()里面调用

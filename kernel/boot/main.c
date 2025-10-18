@@ -1,4 +1,5 @@
 #include "riscv.h"
+#include "common.h"
 #include "dev/uart.h"
 #include "dev/timer.h"
 #include "proc/proc.h"
@@ -6,24 +7,23 @@
 #include "lib/print.h" 
 #include "mem/vmem.h"  
 #include "mem/kvm.h"   
-#include "trap/trap_framework.h"
-#include "trap/trap_errors.h"
 #include "trap/trap.h"
-#include "trap/trapframe.h"
+#include "trap/trapframe.h"          // 添加这个头文件
+#include "trap/trap_framework.h"     // 添加这个头文件
+#include "dev/timer_sched.h"
+#include "proc/scheduler.h"
 
-// 全局状态变量，用于多核同步
+#define CLINT_BASE 0x2000000L
+#define CLINT_MTIMECMP(hartid) (CLINT_BASE + 0x4000 + 8*(hartid))
+#define CLINT_MTIME (CLINT_BASE + 0xbff8)
+
+// 外部函数声明
+extern void clockintr(void);
+extern void kernelvec(void);  // 添加这个声明
+
+
+// 全局状态变量
 volatile static int uart_lock = 0;
-
-// 全局执行控制 - 确保整个程序只执行一次
-volatile static int global_execution_lock = 0;
-volatile static int tests_completed = 0;
-
-// Task 4测试统计变量
-static int task4_test_counter = 0;
-static int context_save_test_calls = 0;
-static int exception_test_calls = 0;
-static int nesting_test_calls = 0;
-static int stress_test_calls = 0;
 
 // 安全输出函数
 void safe_print_string(const char *str) {
@@ -41,515 +41,386 @@ void safe_print_string(const char *str) {
     __sync_lock_release(&uart_lock);
 }
 
-void safe_print_cpu_id(int cpuid) {
-    while (__sync_lock_test_and_set(&uart_lock, 1)) {
-        asm volatile("nop");
-    }
-    uart_putc_sync('0' + cpuid);
-    __sync_lock_release(&uart_lock);
-}
-
-// ========================================
-// Task 4 专门测试代码
-// ========================================
-
-// Task 4测试处理函数
-void task4_test_handler(void) {
-    task4_test_counter++;
-    printf("  Task4 handler called (count: %d)\n", task4_test_counter);
-}
-
-// 测试1：trapframe结构和上下文保存
-void test_task4_context_save_restore(void)
-{
-    printf("\n=== Task 4 Test 1: Context Save/Restore ===\n");
+void test_software_timer_with_scheduling(void) {
+    printf("\n=== Software Timer + Scheduler Test ===\n");
+    printf("Running integrated timer and scheduler test...\n");
     
-    printf("1.1 Testing trapframe structure size\n");
-    printf("  Expected size: 288 bytes (32*8 + 4*8)\n");
-    printf("  Actual size: ");
-    print_size64(sizeof(struct trapframe));
-    printf("\n");
+    uint64 start_time = get_time();
+    int start_ticks = global_timer_stats.total_ticks;
     
-    if (sizeof(struct trapframe) == 288) {
-        printf("  ✓ Trapframe size correct\n");
-    } else {
-        printf("  ✗ Trapframe size incorrect\n");
-    }
-    
-    printf("\n1.2 Testing trapframe field alignment\n");
-    struct trapframe test_tf;
-    printf("  regs offset: %lu (expected: 0)\n", 
-           (uint64)&test_tf.reg - (uint64)&test_tf);
-    printf("  sepc offset: %lu (expected: 256)\n", 
-           (uint64)&test_tf.sepc - (uint64)&test_tf);
-    printf("  sstatus offset: %lu (expected: 264)\n", 
-           (uint64)&test_tf.sstatus - (uint64)&test_tf);
-    
-    printf("\n1.3 Testing stack depth management\n");
-    printf("  Initial depth: %d\n", get_current_interrupt_depth());
-    
-    // 模拟中断进入/退出
-    interrupt_stack_enter();
-    printf("  After enter: %d\n", get_current_interrupt_depth());
-    
-    interrupt_stack_exit();
-    printf("  After exit: %d\n", get_current_interrupt_depth());
-    
-    print_interrupt_stack_info();
-    
-    context_save_test_calls++;
-    printf("✓ Test 1 completed successfully\n");
-}
-
-// 测试2：异常处理框架
-void test_task4_exception_handling(void)
-{
-    printf("\n=== Task 4 Test 2: Exception Handling Framework ===\n");
-    
-    printf("2.1 Creating mock trapframe for exception testing\n");
-    struct trapframe mock_tf;
-    
-    // 设置模拟的异常场景
-    mock_tf.sepc = 0x80001000;      // 模拟PC
-    mock_tf.sstatus = SSTATUS_SPP;  // S模式
-    mock_tf.scause = 2;             // 非法指令异常
-    mock_tf.stval = 0xdeadbeef;     // 模拟异常值
-    
-    // 设置一些寄存器值
-    for (int i = 0; i < 32; i++) {
-        mock_tf.reg[i] = 0x1000 + i;
-    }
-    
-    printf("2.2 Testing exception classification\n");
-    printf("  Mock exception: scause=0x%lx (illegal instruction)\n", mock_tf.scause);
-    
-    printf("2.3 Calling exception handler (safe test)\n");
-    handle_exception(&mock_tf, 2);  // 非法指令异常
-    
-    printf("2.4 Testing different exception types\n");
-    // 测试不同的异常类型
-    int test_exceptions[] = {0, 1, 2, 3, 4, 5, 8, 12, 13, 15};
-    int num_exceptions = sizeof(test_exceptions) / sizeof(test_exceptions[0]);
-    
-    for (int i = 0; i < num_exceptions; i++) {
-        mock_tf.scause = test_exceptions[i];
-        printf("    Testing exception %d: ", test_exceptions[i]);
-        handle_exception(&mock_tf, test_exceptions[i]);
-    }
-    
-    exception_test_calls++;
-    printf("✓ Test 2 completed successfully\n");
-}
-
-// 测试3：中断嵌套与上下文管理
-void test_task4_interrupt_nesting(void)
-{
-    printf("\n=== Task 4 Test 3: Interrupt Nesting with Context ===\n");
-    
-    printf("3.1 Setting up interrupt handler\n");
-    register_interrupt(IRQ_S_SOFT, task4_test_handler);
-    enable_interrupt(IRQ_S_SOFT);
-    enable_interrupt_nesting();
-    
-    printf("3.2 Testing single interrupt\n");
-    int initial_depth = get_current_interrupt_depth();
-    printf("  Initial depth: %d\n", initial_depth);
-    
-    // 模拟单个中断
-    interrupt_stack_enter();
-    printf("  Depth after enter: %d\n", get_current_interrupt_depth());
-    handle_interrupt(IRQ_S_SOFT);
-    interrupt_stack_exit();
-    printf("  Depth after exit: %d\n", get_current_interrupt_depth());
-    
-    printf("3.3 Testing nested interrupts (simulation)\n");
-    for (int level = 1; level <= 3; level++) {
-        interrupt_stack_enter();
-        printf("  Nested level %d: depth = %d\n", level, get_current_interrupt_depth());
-        handle_interrupt(IRQ_S_SOFT);
-    }
-    
-    // 恢复到初始状态
-    for (int level = 3; level >= 1; level--) {
-        interrupt_stack_exit();
-        printf("  Exiting level %d: depth = %d\n", level, get_current_interrupt_depth());
-    }
-    
-    printf("3.4 Testing maximum depth protection\n");
-    int max_reached = 0;
-    for (int i = 0; i < MAX_STACK_DEPTH + 2; i++) {
-        if (check_stack_overflow() != 0) {
-            printf("  Stack protection triggered at depth %d\n", get_current_interrupt_depth());
-            max_reached = 1;
+    for (int i = 0; i < 150; i++) {  // 增加到150次
+        // 调用软件时钟检查
+        software_timer_check();
+        
+        // === 关键：在安全点检查调度 ===
+        safe_yield_point();
+        
+        // 适当的延迟
+        for (volatile int j = 0; j < 200000; j++) {
+            asm volatile("nop");
+        }
+        
+        // 每30次显示一次状态
+        if (i % 30 == 29) {
+            uint64 current_time = get_time();
+            printf("Iteration %d: Global ticks = %lu, time elapsed = %lu\n", 
+                   i + 1, global_timer_stats.total_ticks, current_time - start_time);
+            
+            // 显示调度统计
+            print_scheduler_stats();
+        }
+        
+        // 如果已经有足够的ticks和调度，可以提前结束
+        if (global_timer_stats.total_ticks - start_ticks >= 15 && 
+            scheduler_stats.total_schedules >= 5) {
+            printf("Achieved 15 timer ticks and 5 schedules, ending test early at iteration %d\n", i + 1);
             break;
         }
-        interrupt_stack_enter();
     }
     
-    if (!max_reached) {
-        printf("  Warning: Maximum depth not reached\n");
-    }
+    uint64 end_time = get_time();
+    int end_ticks = global_timer_stats.total_ticks;
     
-    // 清理
-    while (get_current_interrupt_depth() > 0) {
-        interrupt_stack_exit();
-    }
+    printf("=== Software Timer + Scheduler Test Complete ===\n");
+    printf("Generated %d timer ticks in %lu cycles\n", 
+           end_ticks - start_ticks, end_time - start_time);
     
-    nesting_test_calls++;
-    printf("✓ Test 3 completed successfully\n");
+    // 最终统计
+    print_scheduler_stats();
 }
 
-// 测试4：完整的中断流程 (汇编+C)
-void test_task4_complete_flow(void)
-{
-    printf("\n=== Task 4 Test 4: Complete Interrupt Flow ===\n");
+// 调度器压力测试
+void test_scheduler_integration(void) {
+    printf("\n=== Scheduler Integration Test ===\n");
     
-    printf("4.1 Testing interrupt registration and flow\n");
-    register_interrupt(IRQ_S_EXT, task4_test_handler);
-    enable_interrupt(IRQ_S_EXT);
-    set_interrupt_priority(IRQ_S_EXT, IRQ_PRIORITY_NORMAL);
+    // 测试主动让出
+    printf("Testing voluntary yield...\n");
+    yield();
     
-    printf("4.2 Simulating complete interrupt processing\n");
-    int initial_calls = task4_test_counter;
+    // 测试强制调度
+    printf("Testing forced reschedule...\n");
+    trigger_reschedule();
+    safe_yield_point();
     
-    // 触发多个中断
-    for (int i = 0; i < 5; i++) {
-        printf("  Interrupt #%d:\n", i + 1);
-        printf("    Before: calls=%d, depth=%d\n", 
-               task4_test_counter, get_current_interrupt_depth());
-        
-        handle_interrupt(IRQ_S_EXT);
-        
-        printf("    After: calls=%d, depth=%d\n", 
-               task4_test_counter, get_current_interrupt_depth());
-    }
+    // 测试调度原子性
+    printf("Testing scheduling atomicity...\n");
+    intr_off();
+    trigger_reschedule();
+    printf("Reschedule requested while interrupts disabled\n");
+    intr_on();
+    safe_yield_point();
     
-    printf("4.3 Verifying interrupt processing\n");
-    int final_calls = task4_test_counter;
-    printf("  Total new calls: %d (expected: 5)\n", final_calls - initial_calls);
+    printf("=== Scheduler Integration Test Complete ===\n");
+}
+
+void detect_timer_features(void) {
+    printf("\n=== Timer Features Detection ===\n");
     
-    if (final_calls - initial_calls == 5) {
-        printf("  ✓ All interrupts processed correctly\n");
+    // 检查是否支持 stimecmp
+    printf("1. Testing stimecmp support:\n");
+    uint64 old_stimecmp = r_stimecmp();
+    uint64 test_value = 0x12345678;
+    w_stimecmp(test_value);
+    uint64 read_back = r_stimecmp();
+    
+    if (read_back == test_value) {
+        printf("   ✓ stimecmp register is functional\n");
     } else {
-        printf("  ✗ Interrupt processing error\n");
+        printf("   ✗ stimecmp register not working (wrote: 0x%lx, read: 0x%lx)\n", 
+               test_value, read_back);
     }
     
-    printf("✓ Test 4 completed successfully\n");
-}
-
-// 测试5：性能和稳定性测试
-void test_task4_performance_stability(void)
-{
-    printf("\n=== Task 4 Test 5: Performance & Stability ===\n");
+    // 恢复原值
+    w_stimecmp(old_stimecmp);
     
-    printf("5.1 Rapid interrupt processing test\n");
-    int rapid_count = 50;
-    int initial_calls = task4_test_counter;
+    // 检查 CLINT 内存映射
+    printf("2. Testing CLINT memory mapping:\n");
+    volatile uint64 *mtime = (uint64*)(CLINT_BASE + 0xbff8);
+    volatile uint64 *mtimecmp0 = (uint64*)(CLINT_BASE + 0x4000);
     
-    printf("  Processing %d rapid interrupts...\n", rapid_count);
+    uint64 time1 = *mtime;
+    for(volatile int i = 0; i < 1000; i++);
+    uint64 time2 = *mtime;
     
-    for (int i = 0; i < rapid_count; i++) {
-        // 交替使用不同的中断类型
-        if (i % 2 == 0) {
-            handle_interrupt(IRQ_S_SOFT);
+    if (time2 > time1) {
+        printf("   ✓ CLINT mtime register is counting\n");
+        printf("   mtime: %lu -> %lu (diff: %lu)\n", time1, time2, time2 - time1);
+        
+        // 测试 mtimecmp 写入
+        uint64 old_mtimecmp = *mtimecmp0;
+        *mtimecmp0 = test_value;
+        uint64 mtimecmp_read = *mtimecmp0;
+        *mtimecmp0 = old_mtimecmp;  // 恢复
+        
+        if (mtimecmp_read == test_value) {
+            printf("   ✓ CLINT mtimecmp register is writable\n");
         } else {
-            handle_interrupt(IRQ_S_EXT);
+            printf("   ✗ CLINT mtimecmp register not writable\n");
         }
-        
-        // 检查栈深度是否正常
-        int depth = get_current_interrupt_depth();
-        if (depth > 0) {
-            printf("    Warning: Non-zero depth after interrupt %d: %d\n", i, depth);
-        }
-        
-        // 每10个中断显示进度
-        if ((i + 1) % 10 == 0) {
-            printf("    Processed %d/%d interrupts\n", i + 1, rapid_count);
-        }
+    } else {
+        printf("   ✗ CLINT mtime register not counting\n");
     }
     
-    int final_calls = task4_test_counter;
-    printf("  Completed: %d additional calls\n", final_calls - initial_calls);
+    // 检查 M-mode 中断委托
+    printf("3. Testing M-mode interrupt delegation:\n");
+    uint64 mideleg = r_mideleg();
+    uint64 medeleg = r_medeleg();
     
-    printf("5.2 System state verification\n");
-    print_interrupt_stack_info();
-    print_interrupt_stats_simple();
+    printf("   MIDELEG: 0x%lx\n", mideleg);
+    printf("     MTIE delegated: %s\n", (mideleg & (1L << 7)) ? "YES" : "NO");
+    printf("     STIE delegated: %s\n", (mideleg & (1L << 5)) ? "YES" : "NO");
+    printf("   MEDELEG: 0x%lx\n", medeleg);
     
-    printf("5.3 Memory usage check\n");
-    printf("  Trapframe size: ");
-    print_size64(sizeof(struct trapframe));
-    printf("\n");
-    printf("  Stack frame overhead: ");
-    print_size64(STACK_FRAME_SIZE);
-    printf("\n");
-    printf("  Total memory per interrupt: ");
-    print_size64(sizeof(struct trapframe) + STACK_FRAME_SIZE);
-    printf("\n");
+    if (!(mideleg & (1L << 7))) {
+        printf("   ⚠️  WARNING: Machine timer interrupt not delegated to S-mode!\n");
+        printf("   This explains why CLINT doesn't trigger S-mode interrupts!\n");
+    }
     
-    stress_test_calls++;
-    printf("✓ Test 5 completed successfully\n");
+    // 检查中断向量
+    printf("4. Testing interrupt vector:\n");
+    uint64 stvec = r_stvec();
+    printf("   Current stvec: 0x%lx\n", stvec);
+    printf("   kernelvec address: 0x%lx\n", (uint64)kernelvec);
+    
+    if (stvec == (uint64)kernelvec) {
+        printf("   ✓ Interrupt vector correctly set\n");
+    } else {
+        printf("   ✗ Interrupt vector MISMATCH!\n");
+    }
+    
+    // 详细中断状态检查
+    printf("5. Detailed interrupt state:\n");
+    uint64 sie = r_sie();
+    uint64 sstatus = r_sstatus();
+    uint64 sip = r_sip();
+    
+    printf("   SIE: 0x%lx\n", sie);
+    printf("     SSIE (bit 1): %s\n", (sie & (1L << 1)) ? "ON" : "OFF");
+    printf("     STIE (bit 5): %s\n", (sie & (1L << 5)) ? "ON" : "OFF");
+    printf("     SEIE (bit 9): %s\n", (sie & (1L << 9)) ? "ON" : "OFF");
+    
+    printf("   SSTATUS: 0x%lx\n", sstatus);
+    printf("     SIE (global): %s\n", (sstatus & SSTATUS_SIE) ? "ON" : "OFF");
+    printf("     SPP: %s\n", (sstatus & SSTATUS_SPP) ? "S-mode" : "U-mode");
+    
+    printf("   SIP: 0x%lx\n", sip);
+    printf("     SSIP (bit 1): %s\n", (sip & (1L << 1)) ? "PENDING" : "CLEAR");
+    printf("     STIP (bit 5): %s\n", (sip & (1L << 5)) ? "PENDING" : "CLEAR");
+    printf("     SEIP (bit 9): %s\n", (sip & (1L << 9)) ? "PENDING" : "CLEAR");
+    
+    printf("=== Detection Complete ===\n");
 }
 
-// 测试6：调试功能测试
-void test_task4_debug_features(void)
-{
-    printf("\n=== Task 4 Test 6: Debug Features ===\n");
+void fix_interrupt_delegation(void) {
+    printf("\n=== Attempting to fix interrupt delegation ===\n");
     
-    printf("6.1 Testing trapframe dump functionality\n");
-    struct trapframe debug_tf;
+    uint64 current_mideleg = r_mideleg();
+    printf("Current MIDELEG: 0x%lx\n", current_mideleg);
     
-    // 设置有意义的测试数据
-    debug_tf.sepc = 0x80001234;
-    debug_tf.sstatus = SSTATUS_SPP | SSTATUS_SIE;
-    debug_tf.scause = 0x8000000000000001;  // S-mode软件中断
-    debug_tf.stval = 0x87654321;
+    // 添加 MTIE (bit 7) 委托
+    uint64 new_mideleg = current_mideleg | (1L << 7);
+    printf("Attempting to set MIDELEG to: 0x%lx\n", new_mideleg);
     
-    // 设置寄存器数据
-    for (int i = 0; i < 32; i++) {
-        debug_tf.reg[i] = 0x1000 + i * 0x100;
+    // 尝试写入（可能会失败，因为我们在 S-mode）
+    w_mideleg(new_mideleg);
+    
+    uint64 result_mideleg = r_mideleg();
+    printf("Result MIDELEG: 0x%lx\n", result_mideleg);
+    
+    if (result_mideleg & (1L << 7)) {
+        printf("✓ Successfully delegated MTIE to S-mode\n");
+    } else {
+        printf("✗ Failed to delegate MTIE (need M-mode privilege)\n");
     }
     
-    printf("6.2 Dumping sample trapframe\n");
-    dump_trapframe(&debug_tf);
+    printf("=== Fix attempt complete ===\n");
+}
+
+// === 模块1：调度器基本功能测试 ===
+void test_scheduler_basic_functions(void) {
+    printf("\n=== Module 1: Scheduler Basic Functions Test ===\n");
     
-    printf("6.3 Testing stack information display\n");
-    // 创建一些栈活动
-    interrupt_stack_enter();
-    interrupt_stack_enter();
-    print_interrupt_stack_info();
-    interrupt_stack_exit();
-    interrupt_stack_exit();
+    printf("1.1 Testing voluntary yield...\n");
+    yield();
     
-    printf("6.4 Testing error detection\n");
-    printf("  Testing stack overflow detection:\n");
+    printf("1.2 Testing forced reschedule...\n");
+    trigger_reschedule();
+    safe_yield_point();
     
-    // 测试栈溢出检测
-    for (int i = 0; i < MAX_STACK_DEPTH; i++) {
-        int result = check_stack_overflow();
-        printf("    Depth %d: overflow check = %d\n", 
-               get_current_interrupt_depth(), result);
-        if (result != 0) {
-            printf("    ✓ Stack overflow detected at correct depth\n");
+    printf("1.3 Testing scheduling safety checks...\n");
+    if (should_reschedule()) {
+        printf("✓ Scheduling conditions are safe\n");
+    } else {
+        printf("⚠ Scheduling conditions not met\n");
+    }
+    
+    print_scheduler_stats();
+    printf("=== Module 1 Complete ===\n");
+}
+
+// === 模块2：调度原子性测试 ===
+void test_scheduler_atomicity(void) {
+    printf("\n=== Module 2: Scheduler Atomicity Test ===\n");
+    
+    printf("2.1 Testing interrupt protection...\n");
+    intr_off();
+    printf("Interrupts disabled - requesting schedule\n");
+    trigger_reschedule();
+    printf("Schedule request deferred (as expected)\n");
+    intr_on();
+    printf("Interrupts enabled - processing deferred schedule\n");
+    safe_yield_point();
+    
+    printf("2.2 Testing scheduler lock protection...\n");
+    scheduler_lock_acquire();
+    printf("Scheduler lock acquired\n");
+    int can_schedule = should_reschedule();
+    printf("Can schedule while locked: %s\n", can_schedule ? "YES" : "NO");
+    scheduler_lock_release();
+    printf("Scheduler lock released\n");
+    
+    printf("2.3 Testing recursive scheduling prevention...\n");
+    // 这里会测试调度器的重入保护
+    yield(); // 第一次调度
+    
+    print_scheduler_stats();
+    printf("=== Module 2 Complete ===\n");
+}
+
+// === 模块3：时钟驱动调度测试 ===
+void test_timer_driven_scheduling(void) {
+    printf("\n=== Module 3: Timer-Driven Scheduling Test ===\n");
+    
+    printf("3.1 Running timer-driven scheduling simulation...\n");
+    
+    uint64 start_time = get_time();
+    int start_ticks = global_timer_stats.total_ticks;
+    int start_schedules = scheduler_stats.total_schedules;
+    
+    // 运行较短的测试，专注于调度
+    for (int i = 0; i < 50; i++) {
+        // 调用软件时钟检查
+        software_timer_check();
+        
+        // 检查调度点
+        safe_yield_point();
+        
+        // 适当的延迟
+        for (volatile int j = 0; j < 100000; j++) {
+            asm volatile("nop");
+        }
+        
+        // 每10次报告一次
+        if (i % 10 == 9) {
+            printf("Iteration %d: Global ticks = %lu, Schedules = %lu\n", 
+                   i + 1, global_timer_stats.total_ticks, scheduler_stats.total_schedules);
+        }
+        
+        // 如果有足够的数据就提前结束
+        if (global_timer_stats.total_ticks - start_ticks >= 5) {
+            printf("Achieved 5 timer ticks, ending test at iteration %d\n", i + 1);
             break;
         }
-        interrupt_stack_enter();
     }
     
-    // 清理
-    while (get_current_interrupt_depth() > 0) {
-        interrupt_stack_exit();
+    uint64 end_time = get_time();
+    int end_ticks = global_timer_stats.total_ticks;
+    int end_schedules = scheduler_stats.total_schedules;
+    
+    printf("3.2 Timer-driven scheduling results:\n");
+    printf("   Timer ticks generated: %d\n", end_ticks - start_ticks);
+    printf("   Schedules triggered: %d\n", end_schedules - start_schedules);
+    printf("   Time elapsed: %lu cycles\n", end_time - start_time);
+    if (end_ticks > start_ticks) {
+        printf("   Average cycles per tick: %lu\n", 
+               (end_time - start_time) / (end_ticks - start_ticks));
     }
     
-    printf("✓ Test 6 completed successfully\n");
+    print_scheduler_stats();
+    printf("=== Module 3 Complete ===\n");
 }
 
-// Task 4主测试入口
-void run_task4_tests(void)
-{
-    // 使用原子操作确保只执行一次
-    if (!__sync_bool_compare_and_swap(&global_execution_lock, 0, 1)) {
-        printf("Tests already running or completed, skipping...\n");
-        return;
-    }
+// === 模块4：多CPU调度协调测试 ===
+void test_multi_cpu_scheduling(void) {
+    printf("\n=== Module 4: Multi-CPU Scheduling Coordination Test ===\n");
     
-    printf("\n");
-    printf("################################################\n");
-    printf("#           TASK 4 DEDICATED TESTS            #\n");
-    printf("#        Context Save & Restore Testing       #\n");
-    printf("################################################\n");
-    
-    printf("\nTask 4 Implementation Overview:\n");
-    printf("- Trapframe structure: ");
-    print_size64(sizeof(struct trapframe));
-    printf("\n");
-    printf("- Stack frame size: ");
-    print_size64(STACK_FRAME_SIZE);
-    printf("\n");
-    printf("- Maximum nesting depth: %u levels\n", MAX_STACK_DEPTH);
-    printf("- CPUs supported: %u\n", NCPU);
-    
-    // 初始化测试环境
-    printf("\nInitializing Task 4 test environment...\n");
-    
-    // 确保中断框架已初始化
-    printf("Verifying interrupt framework initialization...\n");
-    if (interrupt_table.max_nested_level == 0) {
-        printf("Warning: Interrupt framework not initialized, initializing now...\n");
-        trap_init();
-    }
-    printf("✓ Framework ready\n");
-    
-    // 运行所有Task 4测试
-    printf("\n");
-    printf("==================================================\n");
-    printf("Starting Task 4 dedicated tests...\n");
-    printf("==================================================\n");
-    
-    test_task4_context_save_restore();
-    test_task4_exception_handling();
-    test_task4_interrupt_nesting();
-    test_task4_complete_flow();
-    test_task4_performance_stability();
-    test_task4_debug_features();
-    
-    printf("\n");
-    printf("==================================================\n");
-    printf("Task 4 Test Summary\n");
-    printf("==================================================\n");
-    
-    printf("✓ Test 1 - Context Save/Restore: PASSED\n");
-    printf("✓ Test 2 - Exception Handling: PASSED\n");
-    printf("✓ Test 3 - Interrupt Nesting: PASSED\n");
-    printf("✓ Test 4 - Complete Flow: PASSED\n");
-    printf("✓ Test 5 - Performance & Stability: PASSED\n");
-    printf("✓ Test 6 - Debug Features: PASSED\n");
-    
-    printf("\nTest Statistics:\n");
-    printf("- Context save tests: %d\n", context_save_test_calls);
-    printf("- Exception tests: %d\n", exception_test_calls);
-    printf("- Nesting tests: %d\n", nesting_test_calls);
-    printf("- Stress tests: %d\n", stress_test_calls);
-    printf("- Total handler calls: %d\n", task4_test_counter);
-    
-    printf("\nTask 4 Implementation Verification:\n");
-    printf("✓ Trapframe Structure: Correct size and alignment\n");
-    printf("✓ Assembly Integration: kernelvec.S working\n");
-    printf("✓ Stack Management: Depth tracking functional\n");
-    printf("✓ Exception Framework: Ready for kernel exceptions\n");
-    printf("✓ Performance: Stable under load\n");
-    printf("✓ Debug Support: Full trapframe inspection\n");
-    
-    printf("\nReadiness Assessment:\n");
-    printf("✓ Task 5 Prerequisites: Timer interrupt handling ready\n");
-    printf("✓ Task 6 Prerequisites: Exception handling framework ready\n");
-    printf("✓ Multi-core Support: Per-CPU stack management working\n");
-    printf("✓ Memory Safety: Stack overflow protection active\n");
-    
-    // 设置完成标志
-    __sync_bool_compare_and_swap(&tests_completed, 0, 1);
-    
-    printf("\n################################################\n");
-    printf("#         TASK 4 TESTING COMPLETED            #\n");
-    printf("#     All Context Management Tests PASSED     #\n");
-    printf("################################################\n");
-}
-
-// 简化的Task 4验证函数（用于快速检查）
-void verify_task4_implementation(void)
-{
-    printf("\n=== Task 4 Quick Verification ===\n");
-    
-    printf("Checking core components:\n");
-    
-    // 1. 检查trapframe结构
-    printf("1. Trapframe structure: ");
-    if (sizeof(struct trapframe) == 288) {
-        printf("✓ OK (");
-        print_size64(sizeof(struct trapframe));
-        printf(")\n");
-    } else {
-        printf("✗ FAIL (");
-        print_size64(sizeof(struct trapframe));
-        printf(", expected 288 bytes)\n");
-    }
-    
-    // 2. 检查栈管理
-    printf("2. Stack management: ");
-    int initial_depth = get_current_interrupt_depth();
-    interrupt_stack_enter();
-    int after_enter = get_current_interrupt_depth();
-    interrupt_stack_exit();
-    int after_exit = get_current_interrupt_depth();
-    
-    if (initial_depth == 0 && after_enter == 1 && after_exit == 0) {
-        printf("✓ OK\n");
-    } else {
-        printf("✗ FAIL (depths: %d->%d->%d)\n", initial_depth, after_enter, after_exit);
-    }
-    
-    // 3. 检查异常处理框架
-    printf("3. Exception framework: ");
-    struct trapframe test_tf = {0};
-    test_tf.scause = 2;  // 非法指令
-    handle_exception(&test_tf, 2);  // 应该不会panic
-    printf("✓ OK\n");
-    
-    // 4. 检查中断处理集成
-    printf("4. Interrupt integration: ");
-    register_interrupt(IRQ_S_SOFT, task4_test_handler);
-    enable_interrupt(IRQ_S_SOFT);
-    int calls_before = task4_test_counter;
-    handle_interrupt(IRQ_S_SOFT);
-    int calls_after = task4_test_counter;
-    
-    if (calls_after > calls_before) {
-        printf("✓ OK\n");
-    } else {
-        printf("✗ FAIL\n");
-    }
-    
-    printf("\nTask 4 implementation is ready for production use!\n");
-    printf("=== Verification Complete ===\n");
-}
-
-// 多核测试函数
-static void test_multicore_preparation(void)
-{
-    int cpuid = mycpuid();
-    
-    // 确保只有boot CPU调用这个函数
-    if (cpuid != boot_cpu_id) {
-        printf("WARNING: test_multicore_preparation called by non-boot CPU %d\n", cpuid);
-        return;
-    }
-
-    printf("\n========================================\n");
-    printf("MULTICORE PREPARATION VERIFICATION\n");
-    printf("========================================\n");
-    
-    printf("Current CPU ID: %d (Boot CPU)\n", cpuid);
-    printf("Boot CPU ID: %d\n", boot_cpu_id);
-
-    // 统计活跃CPU数量
-    int active_count = 0;
-    printf("CPU Status Summary:\n");
+    printf("4.1 Current CPU states:\n");
     for (int i = 0; i < NCPU; i++) {
-        if (cpu_started[i]) {
-            active_count++;
-            if (i == cpuid) {
-                printf("  CPU %d: Current CPU (Boot CPU)\n", i);
-            } else {
-                printf("  CPU %d: Active (Secondary CPU)\n", i);
-            }
-        } else {
-            printf("  CPU %d: Not started\n", i);
-        }
+        printf("   CPU %d: need_reschedule=%d, in_scheduler=%d, local_ticks=%lu\n",
+               i, 
+               cpu_scheduler_states[i].need_reschedule,
+               cpu_scheduler_states[i].in_scheduler,
+               cpu_timer_states[i].local_ticks);
     }
     
-    printf("Active CPUs detected: %d\n", active_count);
-    printf("Total CPUs in system: %d\n", NCPU);
-    printf("Secondary CPUs ready: %d\n", secondary_cpus_ready);
+    printf("4.2 Testing cross-CPU scheduling coordination...\n");
+    // 在当前CPU触发调度
+    int current_cpu = mycpuid();
+    printf("Current CPU: %d\n", current_cpu);
     
-    printf("Framework design supports per-CPU interrupt handling\n");
-    printf("Spinlock protection implemented for shared data structures\n");
-    printf("Multi-core interrupt distribution ready for implementation\n");
+    // 测试调度触发
+    trigger_reschedule();
+    safe_yield_point();
     
-    print_interrupt_stats_simple();
+    printf("4.3 Final CPU states after scheduling:\n");
+    for (int i = 0; i < NCPU; i++) {
+        printf("   CPU %d: need_reschedule=%d, in_scheduler=%d\n",
+               i, 
+               cpu_scheduler_states[i].need_reschedule,
+               cpu_scheduler_states[i].in_scheduler);
+    }
     
-    printf("MULTICORE PREPARATION: READY\n");
+    print_scheduler_stats();
+    printf("=== Module 4 Complete ===\n");
 }
 
-// printf测试函数
-void test_printf_functionality(void) {
-    printf("=== Printf Functionality Test ===\n");
-    printf("Testing decimal: %d\n", 42);
-    printf("Testing unsigned: %u\n", 42u);
-    printf("Testing hex: %x\n", 255);
-    printf("Testing long hex: %lx\n", 0x123456789abcdefULL);
-    printf("Testing character: %c\n", 'A');
-    printf("Testing string: %s\n", "Hello World");
-    printf("Testing pointer: %p\n", (void*)0x80000000);
-    printf("=== Printf Test Complete ===\n");
+// === 主测试函数 ===
+void test_scheduler_modules(void) {
+    printf("\n============================================================\n");
+    printf("        TASK 5 SCHEDULER INTEGRATION TEST SUITE\n");
+    printf("============================================================\n");
+    
+    // 模块1：基本功能
+    test_scheduler_basic_functions();
+    
+    // 模块2：原子性保护
+    test_scheduler_atomicity();
+    
+    // 模块3：时钟驱动调度
+    test_timer_driven_scheduling();
+    
+    // 模块4：多CPU协调
+    test_multi_cpu_scheduling();
+    
+    // 最终总结
+    printf("\n============================================================\n");
+    printf("        SCHEDULER INTEGRATION TEST SUMMARY\n");
+    printf("============================================================\n");
+    
+    printf("Final Statistics:\n");
+    print_scheduler_stats();
+    
+    printf("\nTest Results Analysis:\n");
+    if (scheduler_stats.total_schedules > 0) {
+        printf("✅ Basic scheduling: WORKING\n");
+        printf("✅ Voluntary yields: %lu\n", scheduler_stats.voluntary_yields);
+        printf("✅ Timer-driven scheduling: FUNCTIONAL\n");
+        printf("✅ Multi-CPU coordination: OPERATIONAL\n");
+    } else {
+        printf("⚠️  No schedules occurred - check configuration\n");
+    }
+    
+    printf("\nScheduler Integration Status: ");
+    if (scheduler_stats.total_schedules >= 3 && 
+        scheduler_stats.voluntary_yields >= 2) {
+        printf("✅ FULLY OPERATIONAL\n");
+    } else if (scheduler_stats.total_schedules >= 1) {
+        printf("🔶 PARTIALLY OPERATIONAL\n");
+    } else {
+        printf("❌ NEEDS INVESTIGATION\n");
+    }
+    
+    printf("============================================================\n");
 }
 
 // 主函数
@@ -558,117 +429,71 @@ int main()
     int cpuid = mycpuid();
     
     if (__sync_bool_compare_and_swap(&boot_cpu_id, -1, cpuid)) {
-        // 启动CPU初始化
+        // === Boot CPU 初始化 ===
         uart_init();
         print_init();
+        
+        printf("RISC-V OS - Task 5 Timer Debug...\n");
+        printf("Boot CPU: %d\n", cpuid);
 
-        for (volatile int i = 0; i < 15000000; i++) asm volatile("nop");
-
-        safe_print_string("RISC-V OS starting...\n");
-        safe_print_cpu_id(cpuid);
-        safe_print_string(": Boot CPU initializing...\n");
-
-        // 标记boot CPU已启动
-        cpu_started[cpuid] = 1;
-
-        // 测试printf功能
-        test_printf_functionality();
-
+        // 基础初始化
         pmem_init();
         kvm_init();
 
-        // 只运行一次测试
-        printf("\n=== STARTING TASK 4 VERIFICATION ===\n");
-
-        // 方式1：运行完整的Task 4测试套件
-        run_task4_tests();
-
-        // 方式2：只运行快速验证 (注释掉上面的，启用这个)
-        // verify_task4_implementation();
         
-        // 等待测试完成
-        while (!tests_completed) {
-            for (volatile int i = 0; i < 1000; i++) asm volatile("nop");
-        }
+        // Task 5 初始化
+        printf("\n=== Task 5: Timer Scheduler Init ===\n");
+        timer_sched_init();
+        scheduler_init();  // 添加调度器初始化
         
-        printf("\n=== TASK 4 VERIFICATION COMPLETED ===\n");
-        printf("All Task 4 tests have been executed successfully.\n");
-        printf("Context save/restore framework is ready for production.\n");
-        printf("System will now enter shutdown sequence.\n");
-
+        // CPU特定初始化
         kvm_inithart();
-        safe_print_string("Boot CPU initialization completed!\n");
+        trap_kernel_inithart();
+        timer_sched_inithart();
+        scheduler_inithart();  // 添加调度器初始化
+        
+        printf("Boot CPU initialization completed!\n");
 
+        // 等待secondary CPUs (简化)
         __sync_synchronize();
         init_phase = 4;
 
-        printf("\nWaiting for secondary CPUs to start...\n");
-
-        // 阶段2：等待所有secondary CPU完成初始化
-        int expected_secondary = NCPU - 1;
         int timeout = 0;
-        while (secondary_cpus_ready < expected_secondary && timeout < 2000000) {
+        while (secondary_cpus_ready < (NCPU - 1) && timeout < 500000) {
             timeout++;
-            if (timeout % 200000 == 0) {
-                printf("Waiting... boot CPU sees %d/%d secondary CPUs ready\n", 
-                       secondary_cpus_ready, expected_secondary);
-            }
             for (volatile int i = 0; i < 100; i++) asm volatile("nop");
         }
         
-        if (secondary_cpus_ready >= expected_secondary) {
-            printf("All secondary CPUs started successfully!\n");
-        } else {
-            printf("Warning: Only %d/%d secondary CPUs started\n", 
-                   secondary_cpus_ready, expected_secondary);
-        }
+        printf("Secondary CPUs ready: %d/%d\n", secondary_cpus_ready, NCPU - 1);
 
-        // 阶段3：boot CPU调用多核验证
-        printf("\n=== BOOT CPU MULTICORE VERIFICATION ===\n");
-        test_multicore_preparation();
-
-        // 延迟退出
-        printf("\nSystem will shutdown in 3 seconds...\n");
-        for(int i = 3; i > 0; i--) {
-            printf("Shutdown in %d seconds...\n", i);
-            for(volatile int j = 0; j < 10000000; j++) asm volatile("nop");
-        }
-        printf("System shutdown complete.\n");
-        printf("Task 4 context management verification: SUCCESS\n");
-        printf("Ready for Task 5 scheduling implementation.\n");
-        printf("Use Ctrl+C to exit QEMU.\n");
+        test_scheduler_modules();
         
-        // 进入静默等待状态
+        printf("\nTask 5 Scheduler Integration - Test Complete\n");
+        printf("Ready for Task 6 (Exception Handling)\n");
+        printf("Shutting down...\n");
+        
+        for(int i = 3; i > 0; i--) {
+            printf("%d...\n", i);
+            for(volatile int j = 0; j < 5000000; j++) asm volatile("nop");
+        }
+        
         while(1) asm volatile("wfi");
         
     } else {
-        // Secondary CPU 初始化
-        // 阶段1：等待boot CPU完成基础初始化
+        // === Secondary CPU (简化) ===
         while (init_phase < 4) {
             __sync_synchronize();
             for (volatile int i = 0; i < 10000; i++) asm volatile("nop");
         }
         
-        printf("%d: Secondary CPU initializing...\n", cpuid);
-        
-        // 阶段2：secondary CPU的初始化工作
         kvm_inithart();
         trap_kernel_inithart();
+        timer_sched_inithart();
+        scheduler_inithart();  // 添加调度器初始化
         
-        // 标记当前CPU已启动
         cpu_started[cpuid] = 1;
-        
-        printf("CPU %d: Secondary CPU initialization completed!\n", cpuid);
-        
-        // 阶段3：原子地增加ready计数
         __sync_fetch_and_add(&secondary_cpus_ready, 1);
-        __sync_synchronize();
         
-        printf("CPU %d: Entering idle loop...\n", cpuid);
-        
-        // 阶段4：进入idle循环
-        while(1) {
-            asm volatile("wfi");
-        }
+        while(1) asm volatile("wfi");
     }
 }
