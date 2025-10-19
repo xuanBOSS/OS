@@ -10,6 +10,7 @@
 #include "trap/trapframe.h"
 #include "dev/timer_sched.h"
 #include "trap/exception.h"
+#include "test/interrupt_test.h"
 
 // 添加缺少的常量定义
 #ifndef SCAUSE_INTERRUPT
@@ -17,7 +18,6 @@
 #endif
 
 extern void kernelvec(void);  // 声明汇编中的kernelvec函数
-void clockintr(void);
 
 // 栈管理相关定义 
 #define STACK_FRAME_SIZE     512     
@@ -278,7 +278,11 @@ int devintr_check(void) {
     
     if (scause == 0x8000000000000005L) {
         printf("Timer interrupt detected!\n");
-        clockintr();
+        
+        // 直接在这里更新测试统计
+        update_interrupt_stats();
+        
+        clockintr();  // 调用 timer_sched.c 中的 clockintr
         return 2;
     } else if (scause == 0x8000000000000009L) {
         printf("External interrupt detected!\n");
