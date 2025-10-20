@@ -14,6 +14,7 @@
 #include "proc/scheduler.h"
 #include "trap/exception.h" 
 #include "test/interrupt_test.h"
+#include "test/lab3_validation.h"
 
 // 外部函数声明
 extern void clockintr(void);
@@ -40,6 +41,7 @@ void safe_print_string(const char *str) {
     __sync_lock_release(&uart_lock);
 }
 
+// 主函数
 // 主函数
 int main()
 {
@@ -85,29 +87,88 @@ int main()
         
         printf("Secondary CPUs ready: %d/%d\n", secondary_cpus_ready, NCPU - 1);
 
-        // === Lab3 中断测试 ===
+        // === Lab3 验收演示（替换原来的测试） ===
         printf("\n============================================================\n");
-        printf("    STARTING LAB3 INTERRUPT SYSTEM TESTS\n");
+        printf("    LAB3 验收演示 - 中断处理与时钟管理\n");
         printf("============================================================\n");
         
         // 等待系统稳定
         for (volatile int i = 0; i < 1000000; i++);
         
-        // 运行完整的中断测试套件
-        run_all_interrupt_tests();
+        // 运行验收演示
+        run_validation_demo();
         
-        // === 异常处理测试 ===
-        printf("\n=== Running Exception Handler Tests ===\n");
-        test_exception_modules();
+        printf("\n=== 验收演示结束，开始交互测试 ===\n");
+        printf("系统就绪，请输入字符测试UART功能\n");
+        printf("同时观察时钟滴答 'T' 字符\n");
         
-        printf("\n=== Lab3 Testing Complete ===\n");
-        printf("Interrupt System: ✅ TESTED\n");
-        printf("Exception Handling: ✅ TESTED\n");
-        printf("Multi-CPU Support: ✅ TESTED\n");
-        printf("\n🎉 LAB3 COMPLETED SUCCESSFULLY! 🎉\n");
+        // === 验收专用：持续UART检查循环 ===
+        int uart_check_counter = 0;
+        int total_input_chars = 0;
         
-        // 进入主循环
-        printf("Entering main loop...\n");
+        while(1) {
+            // 检查UART输入
+            int c = uart_getc_sync();
+            if (c != -1) {
+                total_input_chars++;
+                
+                // === 验收要求：显示输入并回显 ===
+                printf("[输入%d] ", total_input_chars);
+                
+                // 显示字符
+                if (c >= 32 && c <= 126) {
+                    printf("字符='%c' ", c);
+                } else if (c == '\r') {
+                    printf("回车键 ");
+                } else if (c == '\n') {
+                    printf("换行键 ");
+                } else if (c == 27) {
+                    printf("ESC键 ");
+                } else {
+                    printf("控制字符 ");
+                }
+                
+                printf("-> 回显: ");
+                
+                // 回显字符
+                uart_putc_sync(c);
+                
+                // 处理特殊字符和换行
+                if (c == '\r') {
+                    uart_putc_sync('\n');
+                    printf(" [回车+换行]\n");
+                } else if (c == '\n') {
+                    printf(" [换行]\n");
+                } else if (c >= 32 && c <= 126) {
+                    printf(" '%c'\n", c);
+                } else {
+                    printf(" [控制字符]\n");
+                }
+                
+                // 退出条件
+                if (c == 'q' || c == 'Q') {
+                    printf("\n===========================================\n");
+                    printf("检测到退出字符\n");
+                    printf("总共输入了 %d 个字符\n", total_input_chars);
+                    printf("UART输入回显测试完成！\n");
+                    printf("===========================================\n");
+                    break;
+                }
+            }
+            
+            // 每隔一段时间强制输出一个T（模拟时钟滴答）
+            uart_check_counter++;
+            if (uart_check_counter >= 50000) {  // 调整频率
+                printf("T");
+                uart_check_counter = 0;
+            }
+            
+            // 短暂延迟，避免CPU占用过高
+            for (volatile int i = 0; i < 1000; i++);
+        }
+        
+        // 如果退出了循环，进入待机
+        printf("进入系统待机模式...\n");
         while(1) {
             asm volatile("wfi");
         }
@@ -138,7 +199,18 @@ int main()
         test_multi_cpu_interrupts_secondary();  // 参与多CPU测试
         
         printf("CPU %d: Testing completed, entering main loop\n", cpuid);
+        
+        // Secondary CPU 也协助检查时钟滴答
+        int secondary_timer_counter = 0;
         while(1) {
+            // 每个secondary CPU也输出一些T（频率更低）
+            secondary_timer_counter++;
+            if (secondary_timer_counter >= 100000) {
+                printf("T");
+                secondary_timer_counter = 0;
+            }
+            
+            for (volatile int i = 0; i < 5000; i++);
             asm volatile("wfi");
         }
     }

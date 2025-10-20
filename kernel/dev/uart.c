@@ -2,6 +2,7 @@
 
 #include "memlayout.h"
 #include "lib/lock.h"
+#include "lib/print.h"
 
 // the UART control registers.
 // some have different meanings for
@@ -52,6 +53,9 @@ void uart_init(void)
 
   // 使能输出队列和接收队列的中断
   WriteReg(IER, IER_TX_ENABLE | IER_RX_ENABLE);
+
+  // 添加调试信息
+  printf("UART initialized: IER = 0x%x\n", ReadReg(IER));
 }
 
 // 单个字符输出
@@ -89,5 +93,42 @@ void uart_intr(void)
     int c = uart_getc_sync();
     if(c == -1) break;
     uart_putc_sync(c);
+  }
+}
+
+// 检查是否有数据可读
+int uart_can_read(void)
+{
+  return (ReadReg(LSR) & LSR_RX_READY);
+}
+
+// 带调试信息的UART中断处理（用于验收演示）
+void uart_intr_with_debug(void)
+{
+  while(1)
+  {
+    int c = uart_getc_sync();
+    if(c == -1) break;
+    
+    // === 验收要求：显示接收信息 ===
+    printf("[UART] Input: ");
+    if (c >= 32 && c <= 126) {  // 可打印字符
+        printf("'%c' ", c);
+    } else if (c == '\r') {
+        printf("'\\r' ");
+    } else if (c == '\n') {
+        printf("'\\n' ");
+    } else {
+        printf("'?' ");
+    }
+    printf("(0x%02x)\n", c);
+    
+    // 回显字符
+    uart_putc_sync(c);
+    
+    // 如果是回车，也输出换行
+    if (c == '\r') {
+        uart_putc_sync('\n');
+    }
   }
 }

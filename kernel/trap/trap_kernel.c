@@ -204,6 +204,11 @@ void trap_kernel_inithart()
     
     int cpuid = mycpuid();
     
+    // === 添加PLIC hart初始化 ===
+    printf("CPU %d: Initializing PLIC hart...\n", cpuid);
+    plic_inithart();
+    printf("CPU %d: PLIC hart initialized\n", cpuid);
+    
     printf("CPU %d: Setting SIE register...\n", cpuid);
     
     uint64 sie_value = SIE_SSIE | SIE_STIE | SIE_SEIE;
@@ -239,10 +244,11 @@ void external_interrupt_handler()
     
     // 获取中断号
     int irq = plic_claim();
+    printf("PLIC claimed IRQ: %d\n", irq);
     
     if(irq == UART_IRQ) {
         printf("UART interrupt received\n");
-        uart_intr();  // 处理UART中断
+        uart_intr_with_debug();  // 使用带调试的版本
     } else if(irq) {
         printf("Unexpected external interrupt: irq=%d\n", irq);
     }
@@ -250,6 +256,7 @@ void external_interrupt_handler()
     // 通知PLIC中断处理完成
     if(irq) {
         plic_complete(irq);
+        printf("PLIC completed IRQ: %d\n", irq);
     }
 }
 
@@ -277,15 +284,15 @@ int devintr_check(void) {
     uint64 scause = r_scause();
     
     if (scause == 0x8000000000000005L) {
-        printf("Timer interrupt detected!\n");
+        printf("T");  // 添加这行：直接在这里输出T
+        //printf("Timer interrupt detected!\n");  // 调试信息
         
-        // 直接在这里更新测试统计
         update_interrupt_stats();
-        
-        clockintr();  // 调用 timer_sched.c 中的 clockintr
+        clockintr();
         return 2;
     } else if (scause == 0x8000000000000009L) {
         printf("External interrupt detected!\n");
+        external_interrupt_handler();  // 调用完整的外部中断处理
         return 1;
     } else if (scause == 0x8000000000000001L) {
         printf("Software interrupt detected!\n");
@@ -297,15 +304,14 @@ int devintr_check(void) {
 
 void kerneltrap(struct trapframe *tf)
 {
-    uint64 sepc = tf->sepc;           
+    //uint64 sepc = tf->sepc;           
     uint64 sstatus = tf->sstatus;    
     uint64 scause = tf->scause;      
 
-    // 添加调试输出
-    printf(">>> KERNELTRAP CALLED! <<<\n");
-    printf("    scause: 0x%lx\n", scause);
-    printf("    sepc: 0x%lx\n", sepc);
-    printf("    CPU: %d\n", mycpuid());
+    // 简化调试输出，只在非时钟中断时打印
+    if (scause != 0x8000000000000005L) {
+        printf(">>> KERNELTRAP: scause=0x%lx, CPU=%d <<<\n", scause, mycpuid());
+    }
 
     assert(sstatus & SSTATUS_SPP, "kerneltrap: not from s-mode");
     assert(intr_get() == 0, "kerneltrap: interrupt enabled");
@@ -314,20 +320,20 @@ void kerneltrap(struct trapframe *tf)
 
     // 判断是中断还是异常
     if(scause & SCAUSE_INTERRUPT) {
-        printf("    -> Processing interrupt\n");
         int which_dev = devintr_check();
-        if (which_dev == 0) {
-            printf("    -> Unknown interrupt: 0x%lx\n", scause);
-        } else {
-            printf("    -> Interrupt handled, type: %d\n", which_dev);
+        if (which_dev == 0 && scause != 0x8000000000000005L) {
+            printf("Unknown interrupt: 0x%lx\n", scause);
         }
     } else {
-        printf("    -> Processing exception\n");
+        printf("Processing exception: 0x%lx\n", scause);
         handle_exception(tf, scause & 0xf);
     }
     
     interrupt_stack_exit();
-    printf(">>> KERNELTRAP COMPLETE <<<\n");
+    
+    if (scause != 0x8000000000000005L) {
+        printf(">>> KERNELTRAP COMPLETE <<<\n");
+    }
 }
 
 // 在kernel_vector()里面调用

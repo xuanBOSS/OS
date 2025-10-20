@@ -3,10 +3,22 @@
 
 #include "common.h"
 
-// 时钟中断频率配置
+// === 配置1：快速滴答（用于验收演示） ===
+#define SCHED_TIMER_FREQ_HZ     400         // 400Hz = 2.5ms间隔 (很快)
+#define SCHED_TIMER_INTERVAL_MS   2.5       // 2.5毫秒  
+#define SCHED_TIMER_INTERVAL_US   2500      // 2500微秒
+
+/* 
+// === 配置2：正常滴答 ===
 #define SCHED_TIMER_FREQ_HZ     100         // 100Hz = 10ms间隔
 #define SCHED_TIMER_INTERVAL_MS   10        // 10毫秒  
 #define SCHED_TIMER_INTERVAL_US   10000     // 10000微秒
+
+// === 配置3：慢速滴答 ===
+#define SCHED_TIMER_FREQ_HZ     25          // 25Hz = 40ms间隔 (较慢)
+#define SCHED_TIMER_INTERVAL_MS   40        // 40毫秒  
+#define SCHED_TIMER_INTERVAL_US   40000     // 40000微秒
+*/
 
 // 时钟统计信息
 struct timer_stats {
