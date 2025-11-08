@@ -7,116 +7,84 @@
 .align 4
 kernel_vector:
 
-        # ========== 上下文保存阶段 ==========
-        
-        # 1. 分配栈空间 (288字节的trapframe)
-        addi sp, sp, -288
-        
-        # 2. 保存所有32个通用寄存器 (x0-x31)
-        sd x0,  0(sp)    # zero - 为了结构一致性
-        sd x1,  8(sp)    # ra - 返回地址
-        sd x2,  16(sp)   # sp - 暂存，稍后修正
-        sd x3,  24(sp)   # gp - 全局指针
-        sd x4,  32(sp)   # tp - 线程指针
-        sd x5,  40(sp)   # t0 - 临时寄存器
-        sd x6,  48(sp)   # t1
-        sd x7,  56(sp)   # t2  
-        sd x8,  64(sp)   # s0/fp - 帧指针
-        sd x9,  72(sp)   # s1
-        sd x10, 80(sp)   # a0 - 参数/返回值
-        sd x11, 88(sp)   # a1
-        sd x12, 96(sp)   # a2
-        sd x13, 104(sp)  # a3
-        sd x14, 112(sp)  # a4
-        sd x15, 120(sp)  # a5
-        sd x16, 128(sp)  # a6
-        sd x17, 136(sp)  # a7
-        sd x18, 144(sp)  # s2
-        sd x19, 152(sp)  # s3
-        sd x20, 160(sp)  # s4
-        sd x21, 168(sp)  # s5
-        sd x22, 176(sp)  # s6
-        sd x23, 184(sp)  # s7
-        sd x24, 192(sp)  # s8
-        sd x25, 200(sp)  # s9
-        sd x26, 208(sp)  # s10
-        sd x27, 216(sp)  # s11
-        sd x28, 224(sp)  # t3
-        sd x29, 232(sp)  # t4
-        sd x30, 240(sp)  # t5
-        sd x31, 248(sp)  # t6
-        
-        # 3. 修正sp的保存值（因为已经调整了sp）
-        addi t0, sp, 288
-        sd t0, 16(sp)    # 保存原始sp值
-        
-        # 4. 保存CSR寄存器
-        csrr t0, sepc
-        sd t0, 256(sp)   # 保存异常PC
-        
-        csrr t0, sstatus  
-        sd t0, 264(sp)   # 保存状态寄存器
-        
-        csrr t0, scause
-        sd t0, 272(sp)   # 保存异常原因
-        
-        csrr t0, stval
-        sd t0, 280(sp)   # 保存异常值
-        
-        # ========== 调用C处理函数 ==========
-        
-        # 5. 设置参数并调用C函数
-        mv a0, sp        # 将trapframe指针作为参数
-        call kerneltrap  # 调用C中断处理函数
-        
-        # ========== 上下文恢复阶段 ==========
-        
-        # 6. 恢复CSR寄存器
-        ld t0, 256(sp)   # 恢复sepc
-        csrw sepc, t0
-        
-        ld t0, 264(sp)   # 恢复sstatus
-        csrw sstatus, t0
-        
-        # scause和stval是只读的，不需要恢复
-        
-        # 7. 恢复所有32个通用寄存器
-        ld x1,  8(sp)    # ra
-        ld x3,  24(sp)   # gp
-        ld x4,  32(sp)   # tp
-        ld x5,  40(sp)   # t0
-        ld x6,  48(sp)   # t1
-        ld x7,  56(sp)   # t2
-        ld x8,  64(sp)   # s0/fp
-        ld x9,  72(sp)   # s1
-        ld x10, 80(sp)   # a0
-        ld x11, 88(sp)   # a1
-        ld x12, 96(sp)   # a2
-        ld x13, 104(sp)  # a3
-        ld x14, 112(sp)  # a4
-        ld x15, 120(sp)  # a5
-        ld x16, 128(sp)  # a6
-        ld x17, 136(sp)  # a7
-        ld x18, 144(sp)  # s2
-        ld x19, 152(sp)  # s3
-        ld x20, 160(sp)  # s4
-        ld x21, 168(sp)  # s5
-        ld x22, 176(sp)  # s6
-        ld x23, 184(sp)  # s7
-        ld x24, 192(sp)  # s8
-        ld x25, 200(sp)  # s9
-        ld x26, 208(sp)  # s10
-        ld x27, 216(sp)  # s11
-        ld x28, 224(sp)  # t3
-        ld x29, 232(sp)  # t4
-        ld x30, 240(sp)  # t5
-        ld x31, 248(sp)  # t6
-        
-        # 8. 最后恢复sp（释放栈空间）
-        ld x2, 16(sp)    # 恢复原始sp值
-        
-        # 9. 返回被中断的程序
-        sret             # 返回，自动从sepc恢复PC
+        # 准备空间给32个通用寄存器
+        addi sp, sp, -256
+
+        # 寄存器状态保存
+        sd ra, 0(sp)
+        sd sp, 8(sp)
+        sd gp, 16(sp)
+        sd tp, 24(sp)
+        sd t0, 32(sp)
+        sd t1, 40(sp)
+        sd t2, 48(sp)
+        sd s0, 56(sp)
+        sd s1, 64(sp)
+        sd a0, 72(sp)
+        sd a1, 80(sp)
+        sd a2, 88(sp)
+        sd a3, 96(sp)
+        sd a4, 104(sp)
+        sd a5, 112(sp)
+        sd a6, 120(sp)
+        sd a7, 128(sp)
+        sd s2, 136(sp)
+        sd s3, 144(sp)
+        sd s4, 152(sp)
+        sd s5, 160(sp)
+        sd s6, 168(sp)
+        sd s7, 176(sp)
+        sd s8, 184(sp)
+        sd s9, 192(sp)
+        sd s10, 200(sp)
+        sd s11, 208(sp)
+        sd t3, 216(sp)
+        sd t4, 224(sp)
+        sd t5, 232(sp)
+        sd t6, 240(sp)
+
+        # trap的处理过程
+        call trap_kernel_handler
+
+        # 寄存器状态恢复
+        ld ra, 0(sp)
+        ld sp, 8(sp)
+        ld gp, 16(sp)
+        # tp寄存器的值可能不可靠
+        # ld tp, 24(sp)
+        ld t0, 32(sp)
+        ld t1, 40(sp)
+        ld t2, 48(sp)
+        ld s0, 56(sp)
+        ld s1, 64(sp)
+        ld a0, 72(sp)
+        ld a1, 80(sp)
+        ld a2, 88(sp)
+        ld a3, 96(sp)
+        ld a4, 104(sp)
+        ld a5, 112(sp)
+        ld a6, 120(sp)
+        ld a7, 128(sp)
+        ld s2, 136(sp)
+        ld s3, 144(sp)
+        ld s4, 152(sp)
+        ld s5, 160(sp)
+        ld s6, 168(sp)
+        ld s7, 176(sp)
+        ld s8, 184(sp)
+        ld s9, 192(sp)
+        ld s10, 200(sp)
+        ld s11, 208(sp)
+        ld t3, 216(sp)
+        ld t4, 224(sp)
+        ld t5, 232(sp)
+        ld t6, 240(sp)
+
+        # 栈指针恢复
+        addi sp, sp, 256
+
+        # 当前处于S-mode,返回调用者
+        sret
 
 
 # M-mode 中断处理(只包括时钟中断)

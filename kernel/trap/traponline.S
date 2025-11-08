@@ -1,0 +1,119 @@
+# kernel/trap/trampoline.S - 完整版本
+.section trampsec
+
+.globl trampoline
+trampoline:
+        # 这里可以放一些填充指令，确保 user_vector 在正确位置
+        nop
+        nop
+        nop
+        nop
+
+.align 4
+.globl user_vector
+user_vector:
+        # sscratch寄存器存放了p->trapframe
+        csrrw a0, sscratch, a0
+
+        # ✅ 关键修复1：保存 sepc 到正确位置
+        csrr t0, sepc
+        sd t0, 24(a0)           # 保存 epc 到 offset 24
+
+        # 保存通用寄存器到trapframe
+        sd ra, 40(a0)
+        sd sp, 48(a0)
+        sd gp, 56(a0)
+        sd tp, 64(a0)
+        sd t0, 72(a0)
+        sd t1, 80(a0)
+        sd t2, 88(a0)
+        sd s0, 96(a0)
+        sd s1, 104(a0)
+        sd a1, 120(a0)
+        sd a2, 128(a0)
+        sd a3, 136(a0)
+        sd a4, 144(a0)
+        sd a5, 152(a0)
+        sd a6, 160(a0)
+        sd a7, 168(a0)          # ✅ a7 在 offset 168（系统调用号）
+        sd s2, 176(a0)
+        sd s3, 184(a0)
+        sd s4, 192(a0)
+        sd s5, 200(a0)
+        sd s6, 208(a0)
+        sd s7, 216(a0)
+        sd s8, 224(a0)
+        sd s9, 232(a0)
+        sd s10, 240(a0)
+        sd s11, 248(a0)
+        sd t3, 256(a0)
+        sd t4, 264(a0)
+        sd t5, 272(a0)
+        sd t6, 280(a0)
+
+        # 保存 a0 到 p->trapframe
+        csrr t0, sscratch
+        sd t0, 112(a0)
+
+        # sp = tf->kernel_sp
+        ld sp, 8(a0)
+        # tp = tf->kernel_hartid
+        ld tp, 32(a0)
+        # t0 = tf->kernel_trap
+        ld t0, 16(a0)
+
+        # t1 = tf->kernel_satp
+        # 内核页表写入satp寄存器
+        ld t1, 0(a0)
+        csrw satp, t1
+        sfence.vma zero, zero
+
+        # 跳转到trap_user_handler()
+        jr t0
+
+.globl user_return
+user_return:
+        # 切换到用户页表
+        csrw satp, a1
+        sfence.vma zero, zero
+
+        # ✅ 关键修复2：恢复 sepc
+        ld t0, 24(a0)
+        csrw sepc, t0
+
+        # 恢复通用寄存器
+        ld ra, 40(a0)
+        ld sp, 48(a0)
+        ld gp, 56(a0)
+        ld tp, 64(a0)
+        ld t0, 72(a0)
+        ld t1, 80(a0)
+        ld t2, 88(a0)
+        ld s0, 96(a0)
+        ld s1, 104(a0)
+        ld a1, 120(a0)
+        ld a2, 128(a0)
+        ld a3, 136(a0)
+        ld a4, 144(a0)
+        ld a5, 152(a0)
+        ld a6, 160(a0)
+        ld a7, 168(a0)
+        ld s2, 176(a0)
+        ld s3, 184(a0)
+        ld s4, 192(a0)
+        ld s5, 200(a0)
+        ld s6, 208(a0)
+        ld s7, 216(a0)
+        ld s8, 224(a0)
+        ld s9, 232(a0)
+        ld s10, 240(a0)
+        ld s11, 248(a0)
+        ld t3, 256(a0)
+        ld t4, 264(a0)
+        ld t5, 272(a0)
+        ld t6, 280(a0)
+
+        csrrw a0, sscratch, a0
+
+        # S-mode to U-mode
+        sret

@@ -38,30 +38,20 @@ static long sbi_call(long extension, long function, long arg0, long arg1, long a
 
 // 设置时钟中断
 void sbi_set_timer(uint64 stime) {
-    int cpuid = mycpuid();
-    
-    // 调试输出
-    printf("CPU %d: sbi_set_timer called with time=%lu\n", cpuid, stime);
-    
-    // 调用SBI设置时钟
-    long result = sbi_call(SBI_SET_TIMER, 0, stime, 0, 0);
-    
-    if (result == SBI_SUCCESS) {
-        printf("CPU %d: sbi_set_timer SUCCESS\n", cpuid);
-    } else {
-        printf("CPU %d: sbi_set_timer FAILED with code %ld\n", cpuid, result);
-    }
+    sbi_call(SBI_SET_TIMER, 0, stime, 0, 0);
 }
 
-// 其他有用的SBI接口
+// 控制台输出字符
 void sbi_console_putchar(int ch) {
     sbi_call(SBI_CONSOLE_PUTCHAR, 0, ch, 0, 0);
 }
 
+// 控制台输入字符
 int sbi_console_getchar(void) {
     return sbi_call(SBI_CONSOLE_GETCHAR, 0, 0, 0, 0);
 }
 
+// 系统关机
 void sbi_shutdown(void) {
     sbi_call(SBI_SHUTDOWN, 0, 0, 0, 0);
 }

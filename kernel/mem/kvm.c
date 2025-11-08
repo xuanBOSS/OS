@@ -4,12 +4,14 @@
 #include "lib/print.h"
 #include "riscv.h"
 #include "proc/proc.h"
+#include "memlayout.h"
 
 // 全局内核页表
 pagetable_t kernel_pagetable;
 
 // 外部符号（来自kernel.ld）
 extern char etext[];
+extern char trampoline[];
 
 /**
  * 内核页表映射辅助函数
@@ -29,7 +31,6 @@ static void kvm_map(uint64 va, uint64 pa, uint64 size, int perm)
     // 逐页建立映射
     for (uint64 offset = 0; offset < size; offset += PGSIZE) {
         if (map_page(kernel_pagetable, va + offset, pa + offset, perm) != 0) {
-            printf("kvm_map failed at offset %lx\n", offset);
             panic("kvm_map: map_page failed");
         }
     }
@@ -48,22 +49,26 @@ void kvm_init(void)
         panic("kvm_init: failed to create kernel page table");
     }
     
-    // 减少映射范围，避免内存耗尽
-    // 只映射必要的设备和内核区域
-    kvm_map(UART0, UART0, PGSIZE, PTE_R | PTE_W);
+    // 设备映射
+    kvm_map(UART_BASE, UART_BASE, PGSIZE, PTE_R | PTE_W);
+    kvm_map(PLIC_BASE, PLIC_BASE, 0x100000, PTE_R | PTE_W);
     
-    // 映射较小的PLIC区域
-    kvm_map(PLIC, PLIC, 0x100000, PTE_R | PTE_W);  // 1MB而不是4MB
+    // ✅ 关键修复：映射整个物理内存范围，确保内核可以访问所有页面
+    uint64 phys_start = KERNBASE;     // 0x80000000
+    uint64 phys_end = PHYSTOP;        // 0x88000000
+    uint64 phys_size = phys_end - phys_start;
     
-    // 映射内核代码段
-    uint64 kernel_text_size = PGROUNDUP(32 * PGSIZE);  // 限制为128KB
-    kvm_map(KERNBASE, KERNBASE, kernel_text_size, PTE_R | PTE_X);
+    printf("Mapping entire physical memory: 0x%lx - 0x%lx (size: %ld MB)\n", 
+           phys_start, phys_end, phys_size / (1024*1024));
     
-    // 映射内核数据段（限制大小）
-    uint64 data_start = KERNBASE + kernel_text_size;
-    uint64 data_size = 64 * PGSIZE;  // 限制为256KB
-    kvm_map(data_start, data_start, data_size, PTE_R | PTE_W);
+    // 映射整个物理内存区域（恒等映射）
+    kvm_map(phys_start, phys_start, phys_size, PTE_R | PTE_W | PTE_X);
     
+    // trampoline 映射
+    extern char trampoline[];
+    kvm_map(TRAMPOLINE, (uint64)trampoline, PGSIZE, PTE_R | PTE_X);
+    printf("Trampoline mapped: VA=0x%lx -> PA=0x%lx\n", TRAMPOLINE, (uint64)trampoline);
+
     printf("Kernel page table created successfully!\n");
     printf("=======================================\n");
 }
@@ -73,18 +78,31 @@ void kvm_init(void)
  */
 void kvm_inithart(void)
 {
-    int cpuid = mycpuid();
+    printf("About to enable kernel page table...\n");
     
-    printf("CPU%d: Enabling kernel page table...\n", cpuid);
+    // 验证页表内容
+    extern pagetable_t kernel_pagetable;
+    printf("Kernel pagetable address: 0x%lx\n", (uint64)kernel_pagetable);
     
-    // 1. 内存屏障，确保页表写入完成
+    // 1. 内存屏障
     sfence_vma();
     
-    // 2. 设置SATP寄存器，启用Sv39页表
-    w_satp(MAKE_SATP(kernel_pagetable));
+    // 2. 计算并显示 SATP 值
+    uint64 satp_value = MAKE_SATP(kernel_pagetable);
+    printf("Setting SATP to: 0x%lx\n", satp_value);
     
-    // 3. 刷新TLB
+    // 3. 设置SATP寄存器
+    w_satp(satp_value);
+    
+    // ✅ 关键：添加测试指令确保页表工作
+    printf("Testing page table access...\n");
+    
+    // 4. 刷新TLB
     sfence_vma();
     
-    printf("CPU%d: Virtual memory enabled!\n", cpuid);
+    // 5. 测试访问
+    volatile int test_var = 42;
+    printf("Test variable value: %d\n", test_var);
+    
+    printf("Kernel page table enabled successfully!\n");
 }

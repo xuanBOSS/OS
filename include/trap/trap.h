@@ -6,20 +6,24 @@
     中断是异步的, 异常是同步的
     中断返回时执行下一条指令, 异常返回时重新执行发生异常的指令
     常见中断: 时钟中断 外设中断 软件中断
-    常见异常: 非法指令 页面访问异常 断点异常
+    常见异常: 非法指令 页面访问异常 断点异常 系统调用
 */
 
 #include "common.h"
 
 // trap的初始化和处理
+void trap_kernel_init();
+void trap_kernel_inithart();
+void trap_kernel_handler();
 
-void trap_kernel_init();      //全局初始化
-void trap_kernel_inithart();  //每个CPU核心初始化
-void trap_kernel_handler();   //统一中断处理入口
+void trap_user_handler();
+void trap_user_return();
 
 // 辅助函数: 外设中断和时钟中断处理
+void external_interrupt_handler();
+void timer_interrupt_handler();
 
-void external_interrupt_handler();  //外设中断处理
-void timer_interrupt_handler();     //时钟中断处理
+// Lab4 系统调用支持
+void handle_syscall(uint64 scause, uint64 sepc);
 
 #endif

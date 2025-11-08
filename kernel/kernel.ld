@@ -7,7 +7,13 @@ SECTIONS
 
   .text : {
     *(.text .text.*)
+    
+    /* Lab4: trampoline 段必须页对齐并在 .text 段中 */
     . = ALIGN(0x1000);
+    PROVIDE(trampoline = .);  /* 提供 trampoline 符号 */
+    *(trampsec)
+    . = ALIGN(0x1000);
+    
     PROVIDE(etext = .);
   }
 
@@ -28,15 +34,23 @@ SECTIONS
 
   .bss : {
     . = ALIGN(16);
+    PROVIDE(bss_start = .);
     *(.sbss .sbss.*) /* do not need to distinguish this from .bss */
     . = ALIGN(16);
     *(.bss .bss.*)
+    PROVIDE(bss_end = .);
   }
 
   PROVIDE(end = .);
 
   . = ALIGN(0x1000);           
   PROVIDE(ALLOC_BEGIN = .);    
-  
   PROVIDE(ALLOC_END = 0x88000000);  
+
+  /* Lab4 用户程序段 */
+  .user_init : {
+    PROVIDE(user_init_start = .);
+    *(.user_init)
+    PROVIDE(user_init_end = .);
+  }
 }

@@ -35,6 +35,13 @@ static inline void w_mepc(uint64 x)
   asm volatile("csrw mepc, %0" : : "r" (x));
 }
 
+static inline uint64 r_mepc()
+{
+  uint64 x;
+  asm volatile("csrr %0, mepc" : "=r" (x));
+  return x;
+}
+
 // Supervisor Status Register, sstatus
 
 #define SSTATUS_SPP (1L << 8)  // Previous mode, 1=Supervisor, 0=User
@@ -342,3 +349,96 @@ static inline void w_menvcfg(uint64 x) { asm volatile("csrw menvcfg, %0" : : "r"
 static inline uint64 r_stimecmp() { uint64 x; asm volatile("csrr %0, stimecmp" : "=r" (x)); return x; }
 static inline void w_stimecmp(uint64 x) { asm volatile("csrw stimecmp, %0" : : "r" (x)); }
 
+// 添加读取 sscratch 寄存器的函数
+static inline uint64 r_sscratch()
+{
+  uint64 x;
+  asm volatile("csrr %0, sscratch" : "=r" (x) );
+  return x;
+}
+
+// ============== 新增：PMP (Physical Memory Protection) 寄存器访问函数 ==============
+
+// PMP 配置常量
+#define PMP_R     0x01  // 读权限
+#define PMP_W     0x02  // 写权限  
+#define PMP_X     0x04  // 执行权限
+#define PMP_A     0x18  // 地址匹配模式
+#define PMP_A_TOR 0x08  // Top of Range
+#define PMP_A_NA4 0x10  // Naturally aligned 4-byte
+#define PMP_A_NAPOT 0x18 // Naturally aligned power of two
+#define PMP_L     0x80  // 锁定位
+
+// PMP 地址寄存器 (pmpaddr0-15)
+static inline void w_pmpaddr0(uint64 x)
+{
+  asm volatile("csrw pmpaddr0, %0" : : "r" (x));
+}
+
+static inline uint64 r_pmpaddr0()
+{
+  uint64 x;
+  asm volatile("csrr %0, pmpaddr0" : "=r" (x));
+  return x;
+}
+
+static inline void w_pmpaddr1(uint64 x)
+{
+  asm volatile("csrw pmpaddr1, %0" : : "r" (x));
+}
+
+static inline uint64 r_pmpaddr1()
+{
+  uint64 x;
+  asm volatile("csrr %0, pmpaddr1" : "=r" (x));
+  return x;
+}
+
+static inline void w_pmpaddr2(uint64 x)
+{
+  asm volatile("csrw pmpaddr2, %0" : : "r" (x));
+}
+
+static inline uint64 r_pmpaddr2()
+{
+  uint64 x;
+  asm volatile("csrr %0, pmpaddr2" : "=r" (x));
+  return x;
+}
+
+static inline void w_pmpaddr3(uint64 x)
+{
+  asm volatile("csrw pmpaddr3, %0" : : "r" (x));
+}
+
+static inline uint64 r_pmpaddr3()
+{
+  uint64 x;
+  asm volatile("csrr %0, pmpaddr3" : "=r" (x));
+  return x;
+}
+
+// PMP 配置寄存器 (pmpcfg0, pmpcfg2, ...)
+static inline void w_pmpcfg0(uint64 x)
+{
+  asm volatile("csrw pmpcfg0, %0" : : "r" (x));
+}
+
+static inline uint64 r_pmpcfg0()
+{
+  uint64 x;
+  asm volatile("csrr %0, pmpcfg0" : "=r" (x));
+  return x;
+}
+
+static inline void w_pmpcfg2(uint64 x)
+{
+  asm volatile("csrw pmpcfg2, %0" : : "r" (x));
+}
+
+static inline uint64 r_pmpcfg2()
+{
+  uint64 x;
+  asm volatile("csrr %0, pmpcfg2" : "=r" (x));
+  return x;
+}

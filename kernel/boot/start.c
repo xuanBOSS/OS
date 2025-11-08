@@ -1,87 +1,89 @@
+// kernel/boot/start.c - 只做初始化，不切换
 #include "riscv.h"
 #include "lib/print.h"
 #include "proc/proc.h" 
+#include "proc/cpu.h"
 
-__attribute__ ((aligned (4096))) uint8 CPU_stack[4096 * NCPU];
+//__attribute__ ((aligned (4096))) uint8 CPU_stack[4096 * NCPU];
 
-// 添加M模式初始化函数
-void mmode_init(void) {
-    printf("=== M-mode initialization ===\n");
-    
-    // === 关键修复：精确设置中断委托位 ===
-    // RISC-V 标准中断位：
-    // bit 1: SSIE (supervisor software interrupt)
-    // bit 5: STIE (supervisor timer interrupt)  
-    // bit 9: SEIE (supervisor external interrupt)
-    // bit 7: MTIE (machine timer interrupt) ← 这个是关键！
-    
-    uint64 mideleg_value = (1L << 1) |  // SSIE
-                           (1L << 5) |  // STIE  
-                           (1L << 9) |  // SEIE
-                           (1L << 7);   // MTIE - 关键添加！
-    
-    w_mideleg(mideleg_value);
-    uint64 actual_mideleg = r_mideleg();
-    printf("M-mode: interrupt delegation = 0x%lx\n", actual_mideleg);
-    
-    // 检查 MTIE 是否成功委托
-    if (actual_mideleg & (1L << 7)) {
-        printf("M-mode: ✓ MTIE successfully delegated to S-mode\n");
-    } else {
-        printf("M-mode: ✗ MTIE delegation failed\n");
-    }
-    
-    // 委托异常给S模式（保持原样）
-    w_medeleg(0xbfff);  // 不用 0xffff，用标准值
-    printf("M-mode: exception delegation = 0x%lx\n", r_medeleg());
-    
-    // 启用S模式中断
+// 全局启动控制变量
+volatile int cpu_start_barrier = 0;
+volatile int current_starting_cpu = 0;
+
+// 声明汇编中的函数
+extern void smode_test();
+
+void debug_print_mstatus_before(uint64 mstatus) {
+    printf("🔍 mstatus before: 0x%lx\n", mstatus);
+}
+
+void debug_print_mstatus_after(uint64 mstatus) {
+    printf("🔍 mstatus after:  0x%lx\n", mstatus);
+}
+
+void debug_print_mepc(uint64 mepc) {
+    printf("🔍 mepc set to:    0x%lx\n", mepc);
+}
+
+void debug_print_main_addr(uint64 addr) {
+    printf("🔍 main function:  0x%lx\n", addr);
+}
+
+void debug_before_mret() {
+    printf("🔍 About to execute mret...\n");
+}
+
+void debug_mret_failed() {
+    printf("❌ mret failed!\n");
+    while(1) asm volatile("nop");
+}
+
+// start函数 - M-mode初始化
+// start函数 - M-mode初始化
+void start() {
+    printf("M-mode: start() called\n");
+
+    // 🔥 重要：设置 S-mode 异常向量
+    extern void simple_trap();
+    w_stvec((uint64)simple_trap);
+
+    // 委托中断和异常到S-mode
+    w_medeleg(0x3fff);
+    w_mideleg(0x1666);
+    printf("M-mode: delegation configured\n");
+
+    // 允许S-mode接收定时器、软件和外部中断
     w_sie(SIE_SEIE | SIE_STIE | SIE_SSIE);
-    printf("M-mode: SIE = 0x%lx\n", r_sie());
-    
-    // === 关键：启用M模式时钟中断 ===
-    uint64 mie_value = r_mie() | MIE_MTIE;  // 使用 MTIE 而不是 STIE
-    w_mie(mie_value);
-    printf("M-mode: MIE = 0x%lx\n", r_mie());
-    
-    // 启用stimecmp扩展（如果支持）
-    uint64 menvcfg = r_menvcfg() | (1L << 63);
-    w_menvcfg(menvcfg);
-    printf("M-mode: MENVCFG = 0x%lx\n", r_menvcfg());
-    
-    // 允许S模式访问时间寄存器
-    w_mcounteren(r_mcounteren() | MCOUNTEREN_TM);
-    printf("M-mode: MCOUNTEREN = 0x%lx\n", r_mcounteren());
-    
-    printf("M-mode initialization completed\n");
-}
 
-// 添加时钟初始化函数
-void timerinit(void) {
-    printf("Initializing timer...\n");
-    
-    // 设置第一个时钟中断（更短的间隔用于测试）
-    uint64 current = r_time();
-    uint64 first_timer = current + 100000;  // 100K cycles ≈ 10ms at 10MHz
-    
-    // 同时设置 CLINT 和 stimecmp
-    w_stimecmp(first_timer);
-    
-    // 也设置 CLINT mtimecmp（如果需要）
-    volatile uint64 *mtimecmp = (uint64*)(0x2000000L + 0x4000 + 8 * mycpuid());
-    *mtimecmp = first_timer;
-    
-    printf("First timer set for time %lu (current: %lu)\n", 
-           first_timer, current);
-}
+    // 配置物理内存保护允许全部访问
+    w_pmpaddr0(0x3fffffffffffffull);
+    w_pmpcfg0(0xf);
+    printf("M-mode: PMP configured\n");
 
-void start()
-{
-    // === 新增：M模式初始化 ===
-    mmode_init();
-    timerinit();
+    // 禁用分页
+    w_satp(0);
+
+    // 设定tp寄存器为当前CPU ID
+    int id = r_mhartid();
+    w_tp(id);
+
+    // 准备mstatus将切换至S态
+    uint64 mstatus_val = r_mstatus();
+    mstatus_val &= ~MSTATUS_MPP_MASK;
+    mstatus_val |= MSTATUS_MPP_S;
+    w_mstatus(mstatus_val);
+
+    // 设置mepc，mret后跳转到smode_test
+    extern void smode_test();
+    w_mepc((uint64)smode_test);
+
+    printf("M-mode: ready to switch to S-mode\n");
+    printf("M-mode: mstatus=0x%lx, mepc=0x%lx\n", r_mstatus(), (uint64)smode_test);
+
+    // 跳转S-mode执行smode_test
+    asm volatile("mret");
     
-    // 允许所有CPU执行到main函数
-    extern int main();
-    main();
+    // 如果执行到这里说明mret失败
+    printf("ERROR: mret failed!\n");
+    while(1) asm volatile("nop");
 }

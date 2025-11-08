@@ -4,10 +4,6 @@
 #include "lib/lock.h"
 #include "common.h"
 
-#ifndef SIP_SSIP
-#define SIP_SSIP (1L << 1)  // S模式软件中断挂起位
-#endif
-
 #ifndef TIMER_FREQ_HZ
 #define TIMER_FREQ_HZ 10000000L  // 10MHz时钟频率
 #endif
@@ -30,6 +26,5 @@ uint64 timer_get_ticks();  // 获取时钟的tick
 
 // 时间获取和计算
 uint64 get_time(void);              // 获取当前时间（直接读RISC-V time寄存器）
-uint64 timer_get_uptime_ms(void);   // 获取系统运行时间（毫秒）
 
 #endif

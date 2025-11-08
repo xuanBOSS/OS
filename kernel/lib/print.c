@@ -7,19 +7,35 @@
 volatile int panicked = 0;
 
 static spinlock_t print_lk;
+static volatile int print_initialized = 0;  // 添加初始化标志
 
 static char digits[] = "0123456789abcdef";
 
 void print_init(void)
 {
-    uart_init(); // 初始化串口
-    // 手动初始化锁（简单赋值，避免函数调用）
-    print_lk.locked = 0;
-    print_lk.name = "print";
-    print_lk.cpuid = -1;
-    // 确保 UART 初始化完成（延迟）
-    for (volatile int i = 0; i < 100000; i++) {
-        asm volatile("nop");
+    // 使用原子操作确保只初始化一次
+    if (__sync_bool_compare_and_swap(&print_initialized, 0, 1)) {
+        // 只有第一个调用的CPU会执行这里
+        uart_init(); // 初始化串口
+        
+        // 手动初始化锁（简单赋值，避免函数调用）
+        print_lk.locked = 0;
+        print_lk.name = "print";
+        print_lk.cpuid = -1;
+        
+        // 确保 UART 初始化完成（延迟）
+        for (volatile int i = 0; i < 100000; i++) {
+            asm volatile("nop");
+        }
+        
+        // 内存屏障，确保初始化完成
+        __sync_synchronize();
+    } else {
+        // 其他CPU等待初始化完成
+        while (!print_initialized) {
+            __sync_synchronize();
+            for (volatile int i = 0; i < 1000; i++) asm volatile("nop");
+        }
     }
 }
 
@@ -120,6 +136,76 @@ void printf(const char *fmt, ...)
     if (fmt == 0)
         return;
 
+    // 如果print还没初始化，直接输出到UART（不加锁）
+    if (!print_initialized) {
+        // 增强的无锁输出，支持更多格式
+        va_start(ap, fmt);
+        for(i = 0; (c = fmt[i] & 0xff) != 0; i++){
+            if(c != '%'){
+                uart_putc_sync(c);
+                continue;
+            }
+            c = fmt[++i] & 0xff;
+            if(c == 0) break;
+            
+            // 检查长度修饰符
+            int is_long = 0;
+            if(c == 'l') {
+                is_long = 1;
+                c = fmt[++i] & 0xff;
+                if(c == 'l') {  // 支持 %ll
+                    c = fmt[++i] & 0xff;
+                }
+            }
+            
+            // 简化处理，支持基本格式
+            switch(c){
+            case 'd':
+                if(is_long) {
+                    printint64(va_arg(ap, int64), 10, 1);
+                } else {
+                    printint(va_arg(ap, int), 10, 1);
+                }
+                break;
+            case 'u':
+                if(is_long) {
+                    printuint64(va_arg(ap, uint64), 10);
+                } else {
+                    printuint(va_arg(ap, uint32), 10);
+                }
+                break;
+            case 'x':
+                if(is_long) {
+                    printuint64(va_arg(ap, uint64), 16);
+                } else {
+                    printuint(va_arg(ap, uint32), 16);
+                }
+                break;
+            case 'c':
+                uart_putc_sync(va_arg(ap, int));
+                break;
+            case 's':
+                if((s = va_arg(ap, char*)) == 0)
+                    s = "(null)";
+                for(; *s; s++)
+                    uart_putc_sync(*s);
+                break;
+            case '%':
+                uart_putc_sync('%');
+                break;
+            default:
+                // 打印未知格式
+                uart_putc_sync('%');
+                if(is_long) uart_putc_sync('l');
+                uart_putc_sync(c);
+                break;
+            }
+        }
+        va_end(ap);
+        return;
+    }
+
+    // 正常的带锁printf（保持不变）
     spinlock_acquire(&print_lk);
 
     va_start(ap, fmt);

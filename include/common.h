@@ -40,4 +40,18 @@ typedef unsigned long size_t;
 // 内核页面数量定义（可根据需要调整）
 #define KERNEL_PAGES 1024       // 内核保留1024个页面（4MB）
 
+// Lab4 用户态进程相关定义
+#define MAX_PROCESSES 64        // 最大进程数
+#define PROC_STACK_SIZE PGSIZE  // 进程栈大小
+#define PROC_NAME_LEN 16        // 进程名长度
+
+// 虚拟地址布局常量
+#define VA_MAX (1UL << 38)      // Sv39最大虚拟地址
+
+// 系统调用相关
+#define SYSCALL_MAX_ARGS 6      // 系统调用最大参数数量
+
+// 新增：进程管理常量
+#define NPROC 16                // 最大进程数（与MAX_PROC保持一致）
+
 #endif

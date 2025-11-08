@@ -26,8 +26,5 @@ bool  pmem_is_valid_page(void* page);     // 检查页面地址是否有效
 static inline void  pmm_init(void) { pmem_init(); }
 static inline void* alloc_page(void) { return pmem_alloc(true); }
 static inline void  free_page(void* page) { pmem_free(page, true); }
-static inline void* alloc_pages(int n) { return pmem_alloc_pages(n, true); }
-
-bool  pmem_is_kernel_page(void* page);  // 检查页面归属
 
 #endif
