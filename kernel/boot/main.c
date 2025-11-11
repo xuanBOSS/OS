@@ -5,14 +5,19 @@
 #include "dev/timer.h"
 #include "proc/proc.h"
 #include "proc/cpu.h"
+#include "proc/scheduler.h"
 #include "mem/pmem.h"  
 #include "lib/print.h" 
 #include "mem/kvm.h"   
 #include "trap/trap.h"
 #include "mem/str.h" 
 #include "memlayout.h"
+#include "syscall/syscall.h"
+#include "fs/file.h"        // ✅ 添加：文件系统头文件
 
-// kernel/main.c - 修复格式化问题
+// ✅ 添加函数声明
+void syscall_init(void);
+
 int main()
 {
     printf("🎉 Successfully switched to S-mode!\n");
@@ -65,11 +70,25 @@ int main()
     }
     printf("Kernel page table: 0x%lx ✅\n", (uint64)kernel_pagetable);
     
+    // ✅ 新增：初始化CPU系统
+    printf("\n=== Initializing CPU System ===\n");
+    cpu_init();
+    
+    // ✅ 新增：初始化文件系统
+    printf("\n=== Initializing File System ===\n");
+    fileinit();
+    
+    printf("\n=== Initializing System Call Framework ===\n");
+    syscall_init();
+
     // 6. 初始化进程管理系统
     printf("\n=== Initializing Process Management ===\n");
     proc_init();
+
+    printf("\n=== Initializing Scheduler ===\n");
+    scheduler_init();
+    scheduler_inithart();
     
-    // 7. 设置用户态陷阱向量
     // 7. 设置用户态陷阱向量
     printf("Setting up user trap vector...\n");
     extern char trampoline[], user_vector[];
@@ -83,6 +102,13 @@ int main()
            trampoline_base, user_vector_addr);
     printf("Debug: vector_offset=0x%lx\n", vector_offset);
     
+// ✅ 修复：确保偏移正确
+if (vector_offset == 0) {
+    printf("❌ ERROR: user_vector and trampoline at same address!\n");
+    printf("Check trampoline.S - user_vector should be after trampoline\n");
+    panic("Invalid trampoline layout");
+}
+
     // 计算在用户页表中的陷阱向量地址
     uint64 user_trap_addr = TRAMPOLINE + vector_offset;
     
@@ -95,12 +121,36 @@ int main()
     printf("  user_vector: 0x%lx\n", (uint64)user_vector);
     printf("  TRAMPOLINE: 0x%lx\n", TRAMPOLINE);
     printf("  TRAPFRAME: 0x%lx\n", TRAPFRAME);
+
+    // printf("\n=== Testing Scheduler ===\n");
+    // scheduler_test();
     
     printf("\n=== All Subsystems Initialized Successfully ===\n");
     
     // 9. 只有 CPU 0 创建第一个进程
     if (mycpuid() == 0) {
         printf("\n=== Creating First User Process ===\n");
+        
+        // ✅ 新增：显示系统状态摘要
+        printf("\n=== System Status Summary ===\n");
+        printf("Physical Memory:\n");
+        printf("  Kernel pages available: %d\n", pmem_available(true));
+        printf("  User pages available: %d\n", pmem_available(false));
+        
+        printf("File System:\n");
+        printf("  Max files: %d\n", NFILE);
+        printf("  Max FDs per process: %d\n", NOFILE);
+        printf("  Max devices: %d\n", NDEV);
+        
+        printf("Process System:\n");
+        printf("  Max processes: %d\n", MAX_PROC);
+        printf("  Current CPU: %d\n", mycpuid());
+        
+        // ✅ 新增：显示CPU状态
+        cpu_stats();
+        
+        printf("\n=== Ready to Start First Process ===\n");
+        
         proc_make_first();
         
         // 如果到达这里说明出错了

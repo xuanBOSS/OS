@@ -11,7 +11,7 @@ extern char ALLOC_END[];
 // 物理内存管理接口
 void  pmem_init(void);
 void* pmem_alloc(bool in_kernel);
-void  pmem_free(void* page, bool in_kernel);
+void  pmem_free(uint64 page, bool in_kernel); 
 
 // 扩展接口（连续页面分配）
 void* pmem_alloc_pages(int n, bool in_kernel); // 分配连续的n个页面
@@ -25,6 +25,6 @@ bool  pmem_is_valid_page(void* page);     // 检查页面地址是否有效
 // 任务3要求的标准接口（兼容性封装）
 static inline void  pmm_init(void) { pmem_init(); }
 static inline void* alloc_page(void) { return pmem_alloc(true); }
-static inline void  free_page(void* page) { pmem_free(page, true); }
+static inline void  free_page(void* page) { pmem_free((uint64)page, true); }
 
 #endif

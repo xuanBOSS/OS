@@ -23,7 +23,4 @@ void trap_user_return();
 void external_interrupt_handler();
 void timer_interrupt_handler();
 
-// Lab4 系统调用支持
-void handle_syscall(uint64 scause, uint64 sepc);
-
 #endif

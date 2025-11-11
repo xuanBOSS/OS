@@ -139,8 +139,10 @@ void trap_kernel_handler()
                 break;
                 
             case 8:  // Environment call from U-mode
-                printf("System call from user mode\n");
-                handle_syscall(scause, sepc);
+                // ✅ 修复：用户态系统调用不应该在内核trap处理器中处理
+                printf("❌ ERROR: User mode syscall in kernel trap handler!\n");
+                printf("This should be handled by trap_user_handler instead\n");
+                panic("User syscall in kernel trap handler");
                 break;
                 
             case 9:  // Environment call from S-mode

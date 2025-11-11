@@ -35,3 +35,94 @@ int memcmp(const void* s1,const void* s2,uint64 n)
     return 0;
 }
 
+// ✅ 添加 strlen 函数
+uint64 strlen(const char* s)
+{
+    uint64 len = 0;
+    while(s[len] != '\0')
+    {
+        len++;
+    }
+    return len;
+}
+
+// ✅ 添加其他常用字符串函数
+char* strcpy(char* dst, const char* src)
+{
+    char* original_dst = dst;
+    while((*dst++ = *src++) != '\0')
+        ;
+    return original_dst;
+}
+
+char* strncpy(char* dst, const char* src, uint64 n)
+{
+    char* original_dst = dst;
+    uint64 i;
+    
+    for(i = 0; i < n && src[i] != '\0'; i++)
+    {
+        dst[i] = src[i];
+    }
+    
+    // 如果源字符串长度小于n，用'\0'填充剩余部分
+    for(; i < n; i++)
+    {
+        dst[i] = '\0';
+    }
+    
+    return original_dst;
+}
+
+int strcmp(const char* s1, const char* s2)
+{
+    while(*s1 && (*s1 == *s2))
+    {
+        s1++;
+        s2++;
+    }
+    return *(unsigned char*)s1 - *(unsigned char*)s2;
+}
+
+int strncmp(const char* s1, const char* s2, uint64 n)
+{
+    for(uint64 i = 0; i < n; i++)
+    {
+        if(s1[i] != s2[i])
+        {
+            return (unsigned char)s1[i] - (unsigned char)s2[i];
+        }
+        if(s1[i] == '\0')
+        {
+            return 0;
+        }
+    }
+    return 0;
+}
+
+char* strchr(const char* s, int c)
+{
+    while(*s != '\0')
+    {
+        if(*s == c)
+        {
+            return (char*)s;
+        }
+        s++;
+    }
+    return (c == '\0') ? (char*)s : NULL;
+}
+
+char* strrchr(const char* s, int c)
+{
+    const char* last = NULL;
+    while(*s != '\0')
+    {
+        if(*s == c)
+        {
+            last = s;
+        }
+        s++;
+    }
+    return (c == '\0') ? (char*)s : (char*)last;
+}

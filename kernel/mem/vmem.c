@@ -117,6 +117,55 @@ int map_page(pagetable_t pt, uint64 va, uint64 pa, int perm)
 }
 
 /**
+ * ✅ 新增：取消页面映射
+ * @param pt 页表
+ * @param va 虚拟地址
+ */
+void unmap_page(pagetable_t pt, uint64 va)
+{
+    if (!pt) {
+        printf("unmap_page: null page table\n");
+        return;
+    }
+    
+    if (va % PGSIZE != 0) {
+        printf("unmap_page: address not page-aligned\n");
+        return;
+    }
+    
+    pte_t* pte = walk_lookup(pt, va);
+    if (pte && (*pte & PTE_V)) {
+        *pte = 0;  // 清除PTE
+        printf("unmap_page: unmapped va=0x%lx\n", va);
+    } else {
+        printf("unmap_page: page at 0x%lx not mapped\n", va);
+    }
+}
+
+/**
+ * ✅ 新增：虚拟地址到物理地址转换
+ * @param pt 页表
+ * @param va 虚拟地址
+ * @return 物理地址，失败返回0
+ */
+uint64 va_to_pa(pagetable_t pt, uint64 va)
+{
+    if (!pt) {
+        return 0;
+    }
+    
+    pte_t* pte = walk_lookup(pt, va);
+    if (!pte || !(*pte & PTE_V)) {
+        return 0;
+    }
+    
+    uint64 pa = PTE_TO_PA(*pte);
+    uint64 offset = va & (PGSIZE - 1);
+    
+    return pa + offset;
+}
+
+/**
  * 递归销毁页表
  * @param pt 要销毁的页表
  */
@@ -133,7 +182,7 @@ void destroy_pagetable(pagetable_t pt)
         }
     }
     
-    pmem_free(pt, true);
+    pmem_free((uint64)pt, true);
 }
 
 /**
@@ -149,4 +198,41 @@ void dump_pagetable(pagetable_t pt, int level)
 void vm_print(pagetable_t pt)
 {
     printf("Virtual memory layout: %p\n", pt);
+}
+
+// ✅ 新增：老师代码兼容函数
+pte_t* vm_getpte(pgtbl_t pgtbl, uint64 va, bool alloc)
+{
+    if (alloc) {
+        return walk_create(pgtbl, va);
+    } else {
+        return walk_lookup(pgtbl, va);
+    }
+}
+
+void vm_mappages(pgtbl_t pgtbl, uint64 va, uint64 pa, uint64 len, int perm)
+{
+    uint64 end_va = va + len;
+    
+    for (uint64 curr_va = va; curr_va < end_va; curr_va += PGSIZE, pa += PGSIZE) {
+        if (map_page(pgtbl, curr_va, pa, perm) != 0) {
+            printf("vm_mappages: failed to map page at 0x%lx\n", curr_va);
+            return;
+        }
+    }
+}
+
+void vm_unmappages(pgtbl_t pgtbl, uint64 va, uint64 len, bool freeit)
+{
+    uint64 end_va = va + len;
+    
+    for (uint64 curr_va = va; curr_va < end_va; curr_va += PGSIZE) {
+        if (freeit) {
+            uint64 pa = va_to_pa(pgtbl, curr_va);
+            if (pa != 0) {
+                pmem_free(pa, false);  // 假设是用户页面
+            }
+        }
+        unmap_page(pgtbl, curr_va);
+    }
 }

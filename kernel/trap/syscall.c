@@ -1,17 +1,31 @@
 #include "lib/print.h"
 #include "trap/trap.h"
 #include "proc/proc.h"
-#include "proc/cpu.h"        // 添加这个头文件，包含 myproc 和 mycpuid
-#include "dev/timer.h"
-#include "riscv.h"
+#include "proc/cpu.h"
+#include "syscall/syscall.h"
+#include "syscall/syscall_table.h"
+#include "mem/mmap.h"
 
-// 系统调用号定义
-#define SYS_print     0   // 打印系统调用
-#define SYS_gettime   1   // 获取时间
-#define SYS_getpid    2   // 获取进程ID
-#define SYS_exit      3   // 退出进程
-
-// 系统调用初始化
 void syscall_init(void) {
-    printf("System call interface initialized\n");
+    printf("=== System Call Framework Initialization ===\n");
+    
+    // 初始化mmap管理器
+    mmap_init();
+    
+    // 打印系统调用表信息
+    printf("System call table size: %d\n", syscall_table_size);
+    printf("Registered system calls:\n");
+    
+    for (int i = 0; i < syscall_table_size; i++) {
+        if (syscall_table[i].func != NULL) {
+            printf("  [%d] %s (args: %d, privilege: %d)\n", 
+                   i, 
+                   syscall_table[i].name ? syscall_table[i].name : "unnamed",
+                   syscall_table[i].arg_count,
+                   syscall_table[i].min_privilege);
+        }
+    }
+    
+    printf("System call interface initialized successfully!\n");
+    printf("===============================================\n");
 }

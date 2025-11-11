@@ -1,0 +1,8 @@
+{
+    "files.associations": {
+        "stat.h": "c",
+        "sysfunc.h": "c",
+        "syscall.h": "c",
+        "syscall_error.h": "c"
+    }
+}

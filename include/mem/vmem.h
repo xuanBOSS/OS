@@ -2,6 +2,7 @@
 #define __VMEM_H__
 
 #include "common.h"
+#include "mmap.h"
 
 /*
     我们使用RISC-V体系结构中的SV39作为虚拟内存的设计规范
@@ -66,6 +67,9 @@ typedef pte_t* pagetable_t;
 pagetable_t create_pagetable(void);
 int map_page(pagetable_t pt, uint64 va, uint64 pa, int perm);
 void destroy_pagetable(pagetable_t pt);
+void unmap_page(pagetable_t pt, uint64 va);  // ✅ 添加缺失的函数声明
+uint64 va_to_pa(pagetable_t pt, uint64 va);  // ✅ 添加缺失的函数声明
+
 
 // 辅助函数
 pte_t* walk_create(pagetable_t pt, uint64 va);
@@ -74,5 +78,30 @@ pte_t* walk_lookup(pagetable_t pt, uint64 va);
 // 调试函数
 void dump_pagetable(pagetable_t pt, int level);
 void vm_print(pagetable_t pt);
+
+// 老师代码中的类型定义（保持兼容性）
+typedef pagetable_t pgtbl_t;
+
+// 添加老师代码中的宏定义
+#define VA_SHIFT(level)         (12 + 9 * (level))
+#define VA_TO_VPN(va,level)     ((((uint64)(va)) >> VA_SHIFT(level)) & 0x1FF)
+#define PTE_CHECK(pte) (((pte) & (PTE_R | PTE_W | PTE_X)) == 0)
+
+// 添加老师代码中的函数声明
+pte_t* vm_getpte(pgtbl_t pgtbl, uint64 va, bool alloc);
+void   vm_mappages(pgtbl_t pgtbl, uint64 va, uint64 pa, uint64 len, int perm);
+void   vm_unmappages(pgtbl_t pgtbl, uint64 va, uint64 len, bool freeit);
+
+// UVM相关函数
+void   uvm_show_mmaplist(mmap_region_t* mmap);
+void   uvm_destroy_pgtbl(pgtbl_t pgtbl);
+void   uvm_copy_pgtbl(pgtbl_t old, pgtbl_t new, uint64 heap_top, uint32 ustack_pages, mmap_region_t* mmap);
+void   uvm_mmap(uint64 begin, uint32 npages, int perm);
+void   uvm_munmap(uint64 begin, uint32 npages);
+uint64 uvm_heap_grow(pgtbl_t pgtbl, uint64 heap_top, uint32 len);
+uint64 uvm_heap_ungrow(pgtbl_t pgtbl, uint64 heap_top, uint32 len);
+void   uvm_copyin(pgtbl_t pgtbl, uint64 dst, uint64 src, uint32 len);
+void   uvm_copyout(pgtbl_t pgtbl, uint64 dst, uint64 src, uint32 len);
+void   uvm_copyin_str(pgtbl_t pgtbl, uint64 dst, uint64 src, uint32 maxlen);
 
 #endif

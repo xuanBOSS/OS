@@ -47,7 +47,6 @@ SECTIONS
   PROVIDE(ALLOC_BEGIN = .);    
   PROVIDE(ALLOC_END = 0x88000000);  
 
-  /* Lab4 用户程序段 */
   .user_init : {
     PROVIDE(user_init_start = .);
     *(.user_init)

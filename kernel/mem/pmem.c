@@ -102,14 +102,15 @@ void* pmem_alloc(bool in_kernel)
     return region_alloc(region);
 }
 
-void pmem_free(void* page, bool in_kernel)
+void pmem_free(uint64 page, bool in_kernel)
 {
-    if (page == NULL) {
+    if (page == 0) {
         return;
     }
     
+    void* page_ptr = (void*)page;
     alloc_region_t* region = in_kernel ? &kern_region : &user_region;
-    region_free(region, page);
+    region_free(region, page_ptr);
 }
 
 void* pmem_alloc_pages(int n, bool in_kernel)
@@ -122,32 +123,35 @@ void* pmem_alloc_pages(int n, bool in_kernel)
         return pmem_alloc(in_kernel);
     }
     
-    // 简单实现：尝试分配连续页面
+    // ✅ 简化实现：逐个分配页面
     alloc_region_t* region = in_kernel ? &kern_region : &user_region;
     
-    void** pages = pmem_alloc(true);  // 临时存储
-    if (!pages) {
+    // 存储分配的页面地址（使用栈数组，限制最大页面数）
+    #define MAX_ALLOC_PAGES 64
+    void* allocated_pages[MAX_ALLOC_PAGES];
+    
+    if (n > MAX_ALLOC_PAGES) {
+        printf("pmem_alloc_pages: too many pages requested (%d > %d)\n", n, MAX_ALLOC_PAGES);
         return NULL;
     }
     
-    // 分配n个页面并检查连续性
+    // 分配n个页面
     for (int i = 0; i < n; i++) {
-        pages[i] = region_alloc(region);
-        if (!pages[i]) {
+        allocated_pages[i] = region_alloc(region);
+        if (!allocated_pages[i]) {
             // 分配失败，释放已分配的页面
             for (int j = 0; j < i; j++) {
-                region_free(region, pages[j]);
+                region_free(region, allocated_pages[j]);
             }
-            pmem_free(pages, true);
             return NULL;
         }
     }
     
-    // 检查连续性（简单版本）
-    uint64 first_pa = (uint64)pages[0];
+    // 检查连续性
+    uint64 first_pa = (uint64)allocated_pages[0];
     bool continuous = true;
     for (int i = 1; i < n; i++) {
-        if ((uint64)pages[i] != first_pa + i * PGSIZE) {
+        if ((uint64)allocated_pages[i] != first_pa + i * PGSIZE) {
             continuous = false;
             break;
         }
@@ -156,13 +160,11 @@ void* pmem_alloc_pages(int n, bool in_kernel)
     if (!continuous) {
         // 不连续，释放所有页面
         for (int i = 0; i < n; i++) {
-            region_free(region, pages[i]);
+            region_free(region, allocated_pages[i]);
         }
-        pmem_free(pages, true);
         return NULL;
     }
     
-    pmem_free(pages, true);
     return (void*)first_pa;
 }
 

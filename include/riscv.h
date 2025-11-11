@@ -442,3 +442,10 @@ static inline uint64 r_pmpcfg2()
   asm volatile("csrr %0, pmpcfg2" : "=r" (x));
   return x;
 }
+
+static inline uint64 r_a7()
+{
+    uint64 x;
+    asm volatile("mv %0, a7" : "=r" (x));
+    return x;
+}

@@ -1,47 +1,54 @@
-# user/Makefile
+# user/Makefile - 最简版本
 include ../common.mk
 
-# 用户程序特殊编译选项
-USER_CFLAGS = $(CFLAGS) -fno-builtin -fno-stack-protector -nostdlib -static
+USER_CFLAGS = $(CFLAGS) -fno-builtin -nostdlib -static -I../include
 USER_LDFLAGS = -nostdlib -static
 
-# 用户程序目标文件
-USER_OBJS = initcode.o
+.PHONY: all clean build test-program 
 
-# 生成的文件
-INITCODE_ELF = initcode.elf
-INITCODE_BIN = initcode
-INITCODE_H = ../kernel/proc/initcode.h
-INITCODE_ASM = initcode.asm
+build: ../kernel/proc/initcode.h
 
-.PHONY: build clean
+all: ../kernel/proc/initcode.h ../kernel/proc/test.h ../kernel/proc/security_test.h
 
-# 编译用户程序源文件
+test-program: ../kernel/proc/test.h
+
+security-test: ../kernel/proc/security_test.h
+
+usys.S: usys.pl
+	perl usys.pl > usys.S
+
 %.o: %.c
-	@$(CC) $(USER_CFLAGS) -c $< -o $@
+	$(CC) $(USER_CFLAGS) -c $< -o $@
 
-# 链接生成 ELF 文件
-$(INITCODE_ELF): $(USER_OBJS) user.ld
-	@$(LD) $(USER_LDFLAGS) -T user.ld -o $(INITCODE_ELF) $(USER_OBJS)
+%.o: %.S
+	$(CC) $(USER_CFLAGS) -c $< -o $@
 
-# 转换为二进制文件
-$(INITCODE_BIN): $(INITCODE_ELF)
-	@$(OBJCOPY) -S -O binary $(INITCODE_ELF) $(INITCODE_BIN)
+initcode.elf: initcode.o user.ld
+	$(LD) $(USER_LDFLAGS) -T user.ld -o $@ initcode.o
 
-# 生成反汇编文件（可选，用于调试）
-$(INITCODE_ASM): $(INITCODE_ELF)
-	@$(OBJDUMP) -S $(INITCODE_ELF) > $(INITCODE_ASM)
+test.elf: test.o ulib.o printf.o umalloc.o usys.o user.ld
+	$(LD) $(USER_LDFLAGS) -T user.ld -o $@ test.o ulib.o printf.o umalloc.o usys.o
 
-# 生成 initcode.h 供内核包含
-$(INITCODE_H): $(INITCODE_BIN) $(INITCODE_ASM)
-	@mkdir -p $(dir $(INITCODE_H))
-	@xxd -i $(INITCODE_BIN) > $(INITCODE_H)
-	@echo "unsigned int initcode_len = sizeof(initcode);" >> $(INITCODE_H)
+security_test.elf: security_test.o ulib.o printf.o umalloc.o usys.o user.ld
+	$(LD) $(USER_LDFLAGS) -T user.ld -o $@ security_test.o ulib.o printf.o umalloc.o usys.o
 
-# 构建目标：生成 initcode.h
-build: $(INITCODE_H)
+%.bin: %.elf
+	$(OBJCOPY) -S -O binary $< $@
 
-# 清理目标
+../kernel/proc/initcode.h: initcode.bin
+	@mkdir -p ../kernel/proc
+	xxd -i $< > $@
+	echo "unsigned int initcode_len = sizeof(initcode_bin);" >> $@
+
+../kernel/proc/test.h: test.bin
+	@mkdir -p ../kernel/proc
+	xxd -i $< > $@
+	echo "unsigned int test_len = sizeof(test_bin);" >> $@
+
+../kernel/proc/security_test.h: security_test.bin
+	@mkdir -p ../kernel/proc
+	xxd -i $< > $@
+	echo "unsigned int security_test_bin_len = sizeof(security_test_bin);" >> $@
+
 clean:
-	@rm -f $(USER_OBJS) $(INITCODE_ELF) $(INITCODE_BIN) $(INITCODE_H) $(INITCODE_ASM) *.d
-	
+	rm -f *.o *.elf *.bin usys.S ../kernel/proc/initcode.h ../kernel/proc/test.h  ../kernel/proc/security_test.h *.d

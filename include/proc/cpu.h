@@ -4,6 +4,12 @@
 #include "common.h"
 #include "proc/proc.h"
 
+// 前向声明，避免循环依赖
+struct proc;
+typedef struct proc proc_t;
+struct context;
+typedef struct context context_t;
+
 // 声明全局变量（保留你原有的多CPU启动管理）
 extern volatile int boot_cpu_id;
 extern volatile int cpu_started[NCPU];
@@ -18,9 +24,16 @@ typedef struct cpu {
     context_t ctx;  // 内核上下文暂存 (老师的版本)
 } cpu_t;
 
+// 全局变量声明
+extern cpu_t cpus[NCPU];          // CPU 数组
+
 // 核心接口
 int     mycpuid(void);
 cpu_t*  mycpu(void);
 proc_t* myproc(void);  // 老师的版本
+
+void    cpu_init(void);                    // 初始化CPU系统
+void    set_current_proc(proc_t* proc);    // 设置当前进程
+void    cpu_stats(void);                   // 显示CPU统计信息
 
 #endif

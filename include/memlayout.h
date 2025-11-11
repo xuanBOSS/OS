@@ -44,8 +44,16 @@
 // 用户态程序布局（低地址区域）
 #define USER_TEXT_BASE  0x1000              // 用户代码起始地址（避开NULL页）
 #define USER_DATA_BASE  0x2000              // 用户数据起始地址
-#define USER_HEAP_BASE  0x3000              // 用户堆起始地址
-#define USER_STACK_TOP  0x4000              // 用户栈顶（16KB处，适合小程序）
+#define USER_HEAP_BASE  0x10000             // 用户堆起始地址（64KB处）
+#define USER_STACK_TOP  0x3000000           // 用户栈顶（48MB处，给堆更多空间）
+
+// ✅ 新增：用户内存映射区域定义
+#define USER_MMAP_BASE  0x40000000UL        // 用户mmap区域起始地址（1GB处）
+#define USER_MMAP_END   0x80000000UL        // 用户mmap区域结束地址（2GB处）
+
+// ✅ 新增：页面对齐宏
+#define PGROUNDUP(sz)   (((sz)+PGSIZE-1) & ~(PGSIZE-1))
+#define PGROUNDDOWN(a)  (((a)) & ~(PGSIZE-1))
 
 // 内核虚拟地址布局
 #define KERNBASE        0x80000000UL        // 内核基地址

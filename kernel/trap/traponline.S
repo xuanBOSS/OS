@@ -1,23 +1,30 @@
-# kernel/trap/trampoline.S - 完整版本
+# kernel/trap/trampoline.S
+# 这部分代码在用户内核切换时发挥作用
+# 不论是内核页表还是用户页表, 这部分代码被映射在同一个虚拟地址空间
+
+# kernel.ld 里面添加这个section
 .section trampsec
 
+# trampoline会作为一个物理页的起点地址
 .globl trampoline
 trampoline:
-        # 这里可以放一些填充指令，确保 user_vector 在正确位置
         nop
         nop
         nop
         nop
 
+# 触发用户态trap后的处理过程
 .align 4
 .globl user_vector
 user_vector:
+
+#------------------sd 过程 (begin)-----------------------
+
         # sscratch寄存器存放了p->trapframe
         csrrw a0, sscratch, a0
 
-        # ✅ 关键修复1：保存 sepc 到正确位置
         csrr t0, sepc
-        sd t0, 24(a0)           # 保存 epc 到 offset 24
+        sd t0, 24(a0)
 
         # 保存通用寄存器到trapframe
         sd ra, 40(a0)
@@ -35,7 +42,7 @@ user_vector:
         sd a4, 144(a0)
         sd a5, 152(a0)
         sd a6, 160(a0)
-        sd a7, 168(a0)          # ✅ a7 在 offset 168（系统调用号）
+        sd a7, 168(a0)
         sd s2, 176(a0)
         sd s3, 184(a0)
         sd s4, 192(a0)
@@ -55,6 +62,8 @@ user_vector:
         csrr t0, sscratch
         sd t0, 112(a0)
 
+#------------------sd 过程 (end)-------------------------
+
         # sp = tf->kernel_sp
         ld sp, 8(a0)
         # tp = tf->kernel_hartid
@@ -71,17 +80,22 @@ user_vector:
         # 跳转到trap_user_handler()
         jr t0
 
+# 用户态trap处理完成后返回
+# user_return(trapframe, pagetable)
 .globl user_return
 user_return:
+
         # 切换到用户页表
         csrw satp, a1
         sfence.vma zero, zero
 
-        # ✅ 关键修复2：恢复 sepc
         ld t0, 24(a0)
         csrw sepc, t0
 
-        # 恢复通用寄存器
+#---------------------ld 过程 (begin)----------------------
+        ld t0, 112(a0)
+        csrw sscratch, t0 
+
         ld ra, 40(a0)
         ld sp, 48(a0)
         ld gp, 56(a0)
@@ -114,6 +128,8 @@ user_return:
         ld t6, 280(a0)
 
         csrrw a0, sscratch, a0
+
+#---------------------ld 过程 (end)----------------------
 
         # S-mode to U-mode
         sret
