@@ -1,1796 +1,1792 @@
-# Lab-5：系统调用
+# Lab-6：进程调度
 
-## 完整的执行流程
+## 1. 核心数据结构分析
 
-### 1. 内核初始化阶段
-
-```
-内核启动 -> 内存管理初始化 -> 虚拟内存初始化 -> 系统调用初始化 -> 进程管理初始化
-```
-
-### 2. 创建第一个用户进程
+### struct context - 上下文切换结构
 
 ```
-proc_make_first() {
-    // 1. 分配进程结构体
-    // 2. 创建用户页表
-    // 3. 分配并映射用户代码页面
-    // 4. 写入用户程序到物理内存
-    // 5. 分配并映射用户栈
-    // 6. 分配trapframe
-    // 7. 配置trapframe（设置用户程序入口地址等）
-    // 8. 调用 user_return() 切换到用户态
-}
-```
-
-### 3. 特权级和地址空间切换（user_return 汇编函数）
-
-```
-user_return:
-    # 1. 切换到用户页表（修改SATP寄存器）
-    # 2. 从trapframe恢复用户寄存器状态
-    # 3. 执行sret指令，切换到用户态（U-mode）
-    # 4. 跳转到用户程序入口地址（epc寄存器中的值）
-```
-
-### 4. 用户程序开始执行
-
-```
-用户程序在虚拟地址0x1000开始执行
--> 执行一些指令
--> 调用ecall指令（系统调用）
--> 触发trap，切换回内核态
-```
-
-### 5. 系统调用处理
-
-```
-ecall指令 -> trap -> trampoline -> trap_user_handler() -> syscall_dispatch() -> 系统调用函数 -> 返回用户态
-```
-
-## **完整的系统调用流程**
-
-```
-用户程序 → 陷阱 → 内核处理 → 返回用户程序
-```
-
-### **第1步：用户程序发起系统调用**
-
-```
-// 用户程序执行：
-li a7, 20    // 设置系统调用号 (getpid)
-li a0, arg1  // 设置参数1
-li a1, arg2  // 设置参数2
-ecall        // 触发系统调用
-```
-
-### **第2步：硬件陷阱处理**
-
-```
-1. CPU检测到 ecall 指令
-2. 硬件自动：
-   - 设置 scause = 8 (环境调用)
-   - 保存当前 PC 到 sepc
-   - 切换到 S-mode (如果从 U-mode)
-   - 跳转到 stvec 指向的地址
-```
-
-### **第3步：陷阱向量处理**
-
-```
-// stvec 指向 trap_user_handler
-void trap_user_handler() {
-    // 1. 保存用户态寄存器到 trapframe
-    // 2. 切换到内核栈
-    // 3. 识别陷阱类型 (scause == 8)
-    // 4. 调用系统调用处理器
-}
-```
-
-### **第4步：系统调用分发**
-
-```
-void syscall() {
-    proc_t* p = myproc();
-    int num = p->tf->a7;  // 获取系统调用号
-    
-    // 查找系统调用表
-    if (syscalls[num]) {
-        p->tf->a0 = syscalls[num]();  // 执行并保存返回值
-    } else {
-        p->tf->a0 = -1;  // 无效系统调用
-    }
-}
-```
-
-### **第5步：具体系统调用执行**
-
-```
-uint64 sys_getpid(void) {
-    proc_t* p = myproc();
-    return p->pid;  // 返回进程ID
-}
-```
-
-### **第6步：返回用户态**
-
-```+
-void trap_user_return() {
-    // 1. 恢复用户态寄存器
-    // 2. 设置 sepc (下一条指令地址)
-    // 3. 执行 sret 指令
-    // 4. 硬件自动切换回用户态
-}
-```
-
-------
-
-## 任务1：理解系统调用的实现原理
-
-### 1. 系统调用的完整流程分析
-
-追踪一个完整的系统调用流程，以`getpid()`为例：
-
-**流程：用户程序调用 → usys.S 桩代码 → ecall 指令 → uservec → usertrap → syscall → 系统调用实现 → 返回用户态**
-
-#### 各环节的作用：
-
-1. **用户程序调用**：用户程序调用`getpid()`
-2. **usys.S 桩代码**：由`usys.pl`生成的汇编代码
-3. **ecall 指令**：触发系统调用陷阱
-4. **uservec**：保存用户态寄存器，切换到内核态
-5. **usertrap**：处理陷阱，识别为系统调用
-6. **syscall**：分发到具体的系统调用函数
-7. **系统调用实现**：执行具体功能
-8. **返回用户态**：恢复用户态寄存器，返回用户程序
-
-#### 参数传递机制：
-
-从代码中可以看到，参数通过RISC-V的寄存器传递：
-
-```
-static uint64 argraw(int n){
-  struct proc *p = myproc();
-  switch (n) {
-  	case 0:
-    	return p->trapframe->a0;  // 第1个参数
-  	case 1: 
-    	return p->trapframe->a1;  // 第2个参数
-  	case 2:
-    	return p->trapframe->a2;  // 第3个参数
-  	case 3:
-    	return p->trapframe->a3;  // 第4个参数
-  	case 4:
-    	return p->trapframe->a4;  // 第5个参数
-  	case 5:
-    	return p->trapframe->a5;  // 第6个参数
-  } 
-  panic("argraw");
-  return -1;
-}
-```
-
-#### 返回值处理：
-
-返回值存储在`a0`寄存器中：
-
-```
-void syscall(void){
-  int num;
-  struct proc *p = myproc();
-
-  num = p->trapframe->a7;
-  if(num > 0 && num < NELEM(syscalls) && syscalls[num]) {
-    // Use num to lookup the system call function for num, call it,
-    // and store its return value in p->trapframe->a0
-    p->trapframe->a0 = syscalls[num]();   // 返回值存入a0
-  } else {
-    printf("%d %s: unknown sys call %d\n",
-            p->pid, p->name, num);
-    p->trapframe->a0 = -1;
-  }
-}
-```
-
-### 2. RISC-V的ecall机制
-
-#### ecall指令的作用：
-
-- 触发环境调用异常
-- 从用户态切换到监督态(supervisor mode)
-- 跳转到`stvec`寄存器指向的陷阱处理程序
-
-#### scause寄存器：
-
-- 系统调用的编码为8 (Environment call from U-mode)
-- 用于区分不同类型的陷阱
-
-#### sepc寄存器：
-
-- 保存触发陷阱的指令地址
-- 返回时需要+4跳过ecall指令
-
-### 3. 特权级切换
-
-#### 用户栈到内核栈的转换：
-
-```
-# 从trapframe中加载内核栈指针
-ld sp, 8(a0)  # p->trapframe->kernel_sp
-```
-
-#### 寄存器状态保存：
-
-在`uservec`中保存所有用户寄存器到trapframe：
-
-```
-# 保存用户寄存器到TRAPFRAME
-sd ra, 40(a0)
-sd sp, 48(a0)
-# ... 保存所有寄存器
-```
-
-#### 页表切换：
-
-```
-# 切换到内核页表
-ld t1, 0(a0)        # 加载kernel_satp
-csrw satp, t1       # 切换页表
-sfence.vma zero, zero  # 刷新TLB
-```
-
-### 深入思考
-
-#### 为什么需要陷阱帧(trapframe)？
-
-1. **状态保存**：保存用户态的完整CPU状态
-2. **参数传递**：系统调用参数通过trapframe传递
-3. **返回值传递**：返回值通过trapframe返回
-4. **内核信息**：存储内核栈指针、页表等信息
-
-#### 系统调用和中断处理的异同：
-
-**相同点**：
-
-- 都使用相同的陷阱处理机制
-- 都需要保存/恢复寄存器状态
-- 都涉及特权级切换
-
-**不同点**：
-
-- **触发方式**：系统调用是主动触发(ecall)，中断是被动触发
-- **scause值**：系统调用是8，中断有不同的编码
-- **处理方式**：系统调用有参数和返回值，中断通常没有
-
-------
-
-## 任务2：分析xv6的系统调用分发机制
-
-### 1. 核心分发逻辑分析
-
-```
-void syscall(void) {
-  int num;
-  struct proc *p = myproc();
-  
-  num = p->trapframe->a7;  // 系统调用号从a7寄存器获取
-  if(num > 0 && num < NELEM(syscalls) && syscalls[num]) {
-    p->trapframe->a0 = syscalls[num]();  // 调用并保存返回值到a0
-  } else {
-    printf("%d %s: unknown sys call %d\n", p->pid, p->name, num);
-    p->trapframe->a0 = -1;  // 错误返回-1
-  }
-}
-```
-
-#### 系统调用号传递：
-
-- 通过`a7`寄存器传递系统调用号
-- 在`usys.pl`生成的桩代码中设置：`li a7, SYS_${name}`
-
-#### 返回值存储：
-
-- 存储在`trapframe->a0`中
-- 用户程序从`a0`寄存器获取返回值
-
-#### 错误处理机制：
-
-- 检查系统调用号的有效性
-- 无效调用返回-1并打印错误信息
-
-### 2. 参数提取函数分析
-
-#### argint() - 获取整数参数：
-
-```
-void argint(int n, int *ip) {
-  *ip = argraw(n);  // 直接从寄存器获取
-}
-```
-
-#### argaddr() - 获取地址参数：
-
-```
-void argaddr(int n, uint64 *ip) {
-  *ip = argraw(n);  // 地址也是64位整数
-}
-```
-
-#### argstr() - 获取字符串参数：
-
-```
-int argstr(int n, char *buf, int max) {
-  uint64 addr;
-  argaddr(n, &addr);           // 先获取字符串地址
-  return fetchstr(addr, buf, max);  // 从用户空间复制字符串
-}
-```
-
-#### 参数来源：
-
-- 参数从trapframe中的寄存器`a0-a5`提取
-- 最多支持6个参数
-
-#### 不同类型参数处理：
-
-- **整数**：直接从寄存器读取
-- **指针**：读取地址，需要后续验证和复制
-- **字符串**：读取地址，然后从用户空间安全复制
-
-#### 边界检查：
-
-在`fetchstr()`中实现：
-
-```
-int fetchstr(uint64 addr, char *buf, int max) {
-  struct proc *p = myproc();
-  if(copyinstr(p->pagetable, buf, addr, max) < 0)
-    return -1;
-  return strlen(buf);
-}
-```
-
-### 3. 用户内存访问机制
-
-#### copyout()和copyin()的作用：
-
-- **copyin()**：从用户空间安全地复制数据到内核空间
-- **copyout()**：从内核空间安全地复制数据到用户空间
-- 这些函数处理页表转换和权限检查
-
-#### 为什么不能直接访问用户内存？
-
-1. **页表不同**：内核和用户使用不同的页表
-2. **地址空间隔离**：用户虚拟地址在内核中无效
-3. **安全性**：防止内核访问无效或恶意地址
-
-#### 防止恶意指针的机制：
-
-1. **地址范围检查**：
-
-   ```
-   // Fetch the uint64 at addr from the current process.
-   int fetchaddr(uint64 addr, uint64 *ip)
-   {
-     struct proc *p = myproc();
-     if(addr >= p->sz || addr+sizeof(uint64) > p->sz) // both tests needed, in case of overflow
-       return -1;
-     if(copyin(p->pagetable, (char *)ip, addr, sizeof(*ip)) != 0)
-       return -1;
-     return 0;
-   }
-   ```
-
-2. **页表验证**：`copyin()`/`copyout()`会验证页表映射
-
-3. **权限检查**：确保用户有访问该内存的权限
-
-### 实际应用示例
-
-以`sys_read()`为例：
-
-```
-uint64 sys_read(void) {
-  struct file *f;
-  int n;
-  uint64 p;
-  
-  argaddr(1, &p);     // 获取缓冲区地址
-  argint(2, &n);      // 获取读取字节数
-  if(argfd(0, 0, &f) < 0)  // 获取文件描述符
-    return -1;
-  return fileread(f, p, n);  // 实际读取操作
-}
-```
-
-这个例子展示了：
-
-1. 参数提取的完整过程
-2. 参数验证（文件描述符检查）
-3. 调用底层实现函数
-4. 返回结果
-
-------
-
-## 任务3：设计系统调用框架
-
-### 1. 系统调用表结构设计
-
-```
-// include/syscall/syscall_table.h
-#ifndef __SYSCALL_TABLE_H__
-#define __SYSCALL_TABLE_H__
-
-#include "common.h"
-
-// 参数类型枚举
-typedef enum {
-    ARG_INT,        // 整数参数
-    ARG_UINT64,     // 64位无符号整数
-    ARG_PTR,        // 指针参数
-    ARG_STRING,     // 字符串参数
-    ARG_BUFFER,     // 缓冲区参数
-} arg_type_t;
-
-// 参数描述结构
-typedef struct {
-    arg_type_t type;    // 参数类型
-    int size;           // 参数大小（对于缓冲区）
-    bool nullable;      // 是否允许为NULL
-} arg_desc_t;
-
-// 系统调用描述符
-typedef struct syscall_desc {
-    uint64 (*func)(void);       // 实现函数指针
-    const char *name;           // 系统调用名称
-    int arg_count;              // 参数个数
-    arg_desc_t args[6];         // 参数描述（最多6个参数）
-    bool need_proc;             // 是否需要进程上下文
-    int min_privilege;          // 最小权限级别
-} syscall_desc_t;
-
-// 系统调用表
-extern syscall_desc_t syscall_table[];
-extern const int syscall_table_size;
-
-// 宏定义简化系统调用注册
-#define SYSCALL_ENTRY(num, func_name, name_str, argc, ...) \
-    [num] = { \
-        .func = (uint64(*)(void))func_name, \
-        .name = name_str, \
-        .arg_count = argc, \
-        .args = {__VA_ARGS__}, \
-        .need_proc = true, \
-        .min_privilege = 0 \
-    }
-
-#endif
-```
-
-### 2. 参数传递机制设计
-
-```
-// include/syscall/syscall_args.h
-#ifndef __SYSCALL_ARGS_H__
-#define __SYSCALL_ARGS_H__
-
-#include "common.h"
-#include "syscall/syscall_table.h"
-
-// 参数提取结果
-typedef struct {
-    int error;          // 错误码
-    uint64 value;       // 参数值
-    void* ptr;          // 指针值（如果是指针类型）
-} arg_result_t;
-
-// 核心参数提取函数
-int get_syscall_arg(int n, long *arg);
-int get_user_string(uint64 user_ptr, char *buf, int max);
-int get_user_buffer(uint64 user_ptr, void *buf, int size);
-
-// 类型安全的参数提取函数
-arg_result_t extract_int_arg(int n);
-arg_result_t extract_uint64_arg(int n);
-arg_result_t extract_ptr_arg(int n);
-arg_result_t extract_string_arg(int n, char *buf, int max);
-arg_result_t extract_buffer_arg(int n, void *buf, int size);
-
-// 参数验证函数
-bool validate_user_ptr(uint64 ptr, size_t size);
-bool validate_user_string(uint64 ptr, size_t max_len);
-bool is_user_accessible(uint64 addr, size_t size, bool write);
-
-#endif
-```
-
-### 3. 错误处理策略设计
-
-```
-// include/syscall/syscall_error.h
-#ifndef __SYSCALL_ERROR_H__
-#define __SYSCALL_ERROR_H__
-
-// 系统调用错误码
-#define SYSCALL_SUCCESS     0
-#define SYSCALL_EINVAL     -1   // 无效参数
-#define SYSCALL_EFAULT     -2   // 内存访问错误
-#define SYSCALL_EPERM      -3   // 权限不足
-#define SYSCALL_ENOSYS     -4   // 系统调用不存在
-#define SYSCALL_ENOMEM     -5   // 内存不足
-#define SYSCALL_EBUSY      -6   // 资源忙
-#define SYSCALL_ENOENT     -7   // 文件不存在
-
-// 错误处理策略
-typedef enum {
-    ERROR_RETURN,       // 返回错误码
-    ERROR_KILL,         // 杀死进程
-    ERROR_PANIC,        // 系统panic
-} error_policy_t;
-
-// 错误处理函数
-void syscall_error(int error_code, const char* syscall_name);
-void set_error_policy(int error_code, error_policy_t policy);
-const char* syscall_strerror(int error_code);
-
-#endif
-```
-
-### 4. 完整的系统调用分发器实现
-
-```
-// kernel/syscall/syscall_dispatch.c
-#include "syscall/syscall_table.h"
-#include "syscall/syscall_args.h"
-#include "syscall/syscall_error.h"
-#include "proc/cpu.h"
-#include "lib/print.h"
-
-// 系统调用分发器
-void syscall_dispatch(void)
-{
-    proc_t* p = myproc();
-    int syscall_num = p->tf->a7;
-    
-    // 1. 验证系统调用号
-    if (syscall_num < 0 || syscall_num >= syscall_table_size) {
-        printf("Invalid syscall number: %d\n", syscall_num);
-        p->tf->a0 = SYSCALL_ENOSYS;
-        return;
-    }
-    
-    syscall_desc_t* desc = &syscall_table[syscall_num];
-    
-    // 2. 检查系统调用是否存在
-    if (desc->func == NULL) {
-        printf("Unimplemented syscall: %s (%d)\n", 
-               desc->name ? desc->name : "unknown", syscall_num);
-        p->tf->a0 = SYSCALL_ENOSYS;
-        return;
-    }
-    
-    // 3. 权限检查
-    if (p->privilege_level < desc->min_privilege) {
-        printf("Permission denied for syscall: %s\n", desc->name);
-        p->tf->a0 = SYSCALL_EPERM;
-        return;
-    }
-    
-    // 4. 参数验证
-    if (!validate_syscall_args(desc)) {
-        printf("Invalid arguments for syscall: %s\n", desc->name);
-        p->tf->a0 = SYSCALL_EINVAL;
-        return;
-    }
-    
-    // 5. 调用系统调用实现
-    uint64 result = desc->func();
-    p->tf->a0 = result;
-    
-    // 6. 调试信息（可选）
-    #ifdef SYSCALL_DEBUG
-    printf("Syscall %s returned: %ld\n", desc->name, result);
-    #endif
-}
-
-// 参数验证辅助函数
-static bool validate_syscall_args(syscall_desc_t* desc)
-{
-    for (int i = 0; i < desc->arg_count; i++) {
-        arg_desc_t* arg = &desc->args[i];
-        uint64 arg_value;
-        
-        arg_uint64(i, &arg_value);
-        
-        switch (arg->type) {
-        case ARG_PTR:
-        case ARG_STRING:
-        case ARG_BUFFER:
-            if (arg_value == 0 && !arg->nullable) {
-                return false;  // NULL指针但不允许为NULL
-            }
-            if (arg_value != 0 && !validate_user_ptr(arg_value, arg->size)) {
-                return false;  // 无效的用户指针
-            }
-            break;
-        case ARG_INT:
-        case ARG_UINT64:
-            // 整数参数通常不需要特殊验证
-            break;
-        }
-    }
-    return true;
-}
-```
-
-### 5. 参数提取实现
-
-```
-// kernel/syscall/syscall_args.c
-#include "syscall/syscall_args.h"
-#include "proc/cpu.h"
-#include "mem/vmem.h"
-#include "lib/str.h"
-
-// 基础参数提取
-int get_syscall_arg(int n, long *arg)
-{
-    if (n < 0 || n > 5) {
-        return SYSCALL_EINVAL;
-    }
-    
-    proc_t* p = myproc();
-    switch (n) {
-    case 0: *arg = p->tf->a0; break;
-    case 1: *arg = p->tf->a1; break;
-    case 2: *arg = p->tf->a2; break;
-    case 3: *arg = p->tf->a3; break;
-    case 4: *arg = p->tf->a4; break;
-    case 5: *arg = p->tf->a5; break;
-    }
-    return SYSCALL_SUCCESS;
-}
-
-// 用户字符串提取
-int get_user_string(uint64 user_ptr, char *buf, int max)
-{
-    if (!validate_user_string(user_ptr, max)) {
-        return SYSCALL_EFAULT;
-    }
-    
-    proc_t* p = myproc();
-    uvm_copyin_str(p->pgtbl, (uint64)buf, user_ptr, max);
-    return SYSCALL_SUCCESS;
-}
-
-// 用户缓冲区提取
-int get_user_buffer(uint64 user_ptr, void *buf, int size)
-{
-    if (!validate_user_ptr(user_ptr, size)) {
-        return SYSCALL_EFAULT;
-    }
-    
-    proc_t* p = myproc();
-    uvm_copyin(p->pgtbl, (uint64)buf, user_ptr, size);
-    return SYSCALL_SUCCESS;
-}
-
-// 指针验证
-bool validate_user_ptr(uint64 ptr, size_t size)
-{
-    if (ptr == 0) return false;  // NULL指针
-    if (ptr >= VA_MAX) return false;  // 超出虚拟地址空间
-    if (ptr + size < ptr) return false;  // 溢出检查
-    
-    proc_t* p = myproc();
-    
-    // 检查地址范围是否在用户空间
-    for (uint64 addr = ptr; addr < ptr + size; addr += PGSIZE) {
-        pte_t* pte = walk_lookup(p->pgtbl, addr);
-        if (!pte || !(*pte & PTE_V) || !(*pte & PTE_U)) {
-            return false;
-        }
-    }
-    return true;
-}
-
-// 字符串验证
-bool validate_user_string(uint64 ptr, size_t max_len)
-{
-    if (!validate_user_ptr(ptr, 1)) return false;
-    
-    // 简单实现：检查前max_len字节是否可访问
-    return validate_user_ptr(ptr, max_len);
-}
-```
-
-### 6. 系统调用表定义
-
-```
-// kernel/syscall/syscall_table.c
-#include "syscall/syscall_table.h"
-#include "syscall/sysfunc.h"
-
-syscall_desc_t syscall_table[] = {
-    [0] = {0}, // 保留
-    
-    SYSCALL_ENTRY(SYS_brk, sys_brk, "brk", 1,
-        {ARG_UINT64, 0, true}  // new_heap_top, 可以为0
-    ),
-    
-    SYSCALL_ENTRY(SYS_mmap, sys_mmap, "mmap", 2,
-        {ARG_UINT64, 0, true},  // start address, 可以为0
-        {ARG_UINT64, 0, false}  // length, 不能为0
-    ),
-    
-    SYSCALL_ENTRY(SYS_munmap, sys_munmap, "munmap", 2,
-        {ARG_UINT64, 0, false}, // start address
-        {ARG_UINT64, 0, false}  // length
-    ),
-    
-    SYSCALL_ENTRY(SYS_copyin, sys_copyin, "copyin", 2,
-        {ARG_PTR, 0, false},    // user pointer
-        {ARG_UINT64, 0, false}  // length
-    ),
-    
-    SYSCALL_ENTRY(SYS_copyout, sys_copyout, "copyout", 1,
-        {ARG_PTR, 0, false}     // user pointer
-    ),
-    
-    SYSCALL_ENTRY(SYS_copyinstr, sys_copyinstr, "copyinstr", 1,
-        {ARG_STRING, 64, false} // user string, max 64 bytes
-    ),
+struct context {
+  uint64 ra;
+  uint64 sp;
+
+  // callee-saved
+  uint64 s0;
+  uint64 s1;
+  uint64 s2;
+  uint64 s3;
+  uint64 s4;
+  uint64 s5;
+  uint64 s6;
+  uint64 s7;
+  uint64 s8;
+  uint64 s9;
+  uint64 s10;
+  uint64 s11;
 };
-
-const int syscall_table_size = sizeof(syscall_table) / sizeof(syscall_table[0]);
 ```
 
-### 7. 回答设计问题
+**作用**：保存进程切换时需要保存的寄存器状态。只保存callee-saved寄存器，因为caller-saved寄存器由调用者负责保存。
 
-#### 1. 如何验证用户提供的指针？
+### struct cpu - CPU状态结构
 
-- **地址范围检查**：确保指针在有效的用户虚拟地址空间内
-- **页表验证**：检查对应的页表项是否有效且具有用户权限
-- **溢出检查**：防止指针运算溢出
-- **NULL指针处理**：根据参数描述决定是否允许NULL
+```
+struct cpu {
+  struct proc *proc;          // The process running on this cpu, or null.
+  struct context context;     // swtch() here to enter scheduler().
+  int noff;                   // Depth of push_off() nesting.
+  int intena;                 // Were interrupts enabled before push_off()?
+};
+```
 
-#### 2. 如何处理系统调用失败？
+**作用**：维护每个CPU核心的状态，支持多核调度。
 
-- **错误码返回**：通过 `a0` 寄存器返回负数错误码
-- **错误策略配置**：支持返回错误、杀死进程、系统panic等策略
-- **错误日志**：记录系统调用失败的详细信息
-- **资源清理**：确保失败时正确释放已分配的资源
+### struct trapframe - 陷阱帧结构
 
-#### 3. 如何支持可变参数的系统调用？
+```
+struct trapframe {
+  /*   0 */ uint64 kernel_satp;   // kernel page table
+  /*   8 */ uint64 kernel_sp;     // top of process's kernel stack
+  /*  16 */ uint64 kernel_trap;   // usertrap()
+  /*  24 */ uint64 epc;           // saved user program counter
+  /*  32 */ uint64 kernel_hartid; // saved kernel tp
+  /*  40 */ uint64 ra;
+  /*  48 */ uint64 sp;
+  /*  56 */ uint64 gp;
+  /*  64 */ uint64 tp;
+  /*  72 */ uint64 t0;
+  /*  80 */ uint64 t1;
+  /*  88 */ uint64 t2;
+  /*  96 */ uint64 s0;
+  /* 104 */ uint64 s1;
+  /* 112 */ uint64 a0;
+  /* 120 */ uint64 a1;
+  /* 128 */ uint64 a2;
+  /* 136 */ uint64 a3;
+  /* 144 */ uint64 a4;
+  /* 152 */ uint64 a5;
+  /* 160 */ uint64 a6;
+  /* 168 */ uint64 a7;
+  /* 176 */ uint64 s2;
+  /* 184 */ uint64 s3;
+  /* 192 */ uint64 s4;
+  /* 200 */ uint64 s5;
+  /* 208 */ uint64 s6;
+  /* 216 */ uint64 s7;
+  /* 224 */ uint64 s8;
+  /* 232 */ uint64 s9;
+  /* 240 */ uint64 s10;
+  /* 248 */ uint64 s11;
+  /* 256 */ uint64 t3;
+  /* 264 */ uint64 t4;
+  /* 272 */ uint64 t5;
+  /* 280 */ uint64 t6;
+};
+```
 
-- **最大参数限制**：RISC-V ABI限制最多6个寄存器参数
-- **参数描述扩展**：在系统调用描述符中记录实际参数个数
-- **栈参数支持**：超过6个参数时从用户栈读取（需要额外实现）
+这个结构保存用户态到内核态切换时的所有寄存器状态，包括：
 
-#### 4. 如何实现系统调用的权限检查？
+- 内核相关信息（satp, sp, trap, hartid）
+- 用户程序计数器（epc）
+- 所有通用寄存器
 
-- **权限级别**：在进程结构中维护权限级别
-- **系统调用权限**：每个系统调用定义最小权限要求
-- **动态检查**：在分发器中进行权限验证
-- **审计日志**：记录权限违规尝试
+### struct proc - 进程控制块
 
-### 测试
-
-![image-20251109151244617](C:\Users\BOSS0\AppData\Roaming\Typora\typora-user-images\image-20251109151244617.png)
-
-![image-20251109151256989](C:\Users\BOSS0\AppData\Roaming\Typora\typora-user-images\image-20251109151256989.png)
-
-![image-20251109151310011](C:\Users\BOSS0\AppData\Roaming\Typora\typora-user-images\image-20251109151310011.png)
-
-![image-20251109151328064](C:\Users\BOSS0\AppData\Roaming\Typora\typora-user-images\image-20251109151328064.png)
-
-![image-20251109151345360](C:\Users\BOSS0\AppData\Roaming\Typora\typora-user-images\image-20251109151345360.png)
-
-![image-20251109151400924](C:\Users\BOSS0\AppData\Roaming\Typora\typora-user-images\image-20251109151400924.png)
-
-![image-20251109151418260](C:\Users\BOSS0\AppData\Roaming\Typora\typora-user-images\image-20251109151418260.png)
-
-![image-20251109151440962](C:\Users\BOSS0\AppData\Roaming\Typora\typora-user-images\image-20251109151440962.png)
-
-![image-20251109151508107](C:\Users\BOSS0\AppData\Roaming\Typora\typora-user-images\image-20251109151508107.png)
-
-![image-20251109151526344](C:\Users\BOSS0\AppData\Roaming\Typora\typora-user-images\image-20251109151526344.png)
-
-![image-20251109151537744](C:\Users\BOSS0\AppData\Roaming\Typora\typora-user-images\image-20251109151537744.png)
-
-1. **Test 1: test_basic (syscall 10)**
-   - 参数：无参数
-   - 结果：返回 42 
-   - 验证：基本系统调用功能
-2. **Test 2: test_args (syscall 11)**
-   - 参数：a0=100, a1=200, a2=300
-   - 结果：返回 600 (100+200+300) 
-   - 验证：参数传递机制
-3. **Test 3: test_error (syscall 12, mode=1)**
-   - 参数：a0=1 (错误模式1)
-   - 结果：返回 EINVAL (-1) 
-   - 验证：错误处理策略
-4. **Test 4: test_error (syscall 12, mode=2)**
-   - 参数：a0=2 (错误模式2)
-   - 结果：返回 EFAULT (-2) 
-   - 验证：多种错误类型处理
-5. **Test 5: test_privilege (syscall 13)**
-   - 权限要求：需要级别1，当前级别0
-   - 结果：返回 EPERM (-3) 
-   - 验证：权限检查机制，包括错误策略处理
-6. **Test 6: invalid syscall (99)**
-   - 系统调用号：99 (不存在)
-   - 结果：返回 ENOSYS (-4) 
-   - 验证：无效系统调用处理
-
-### 工作总结
-
-#### **系统调用框架代码结构**
-
-我们实现了完整的系统调用框架，包含以下文件：
-
-##### 1. **核心框架文件**
-
-**`syscall_table.h` & `syscall_table.c`**
-
-- 定义了完整的系统调用描述符结构
-- 实现了系统调用表，支持参数类型描述
-- 包含12个注册的系统调用（6个基础 + 6个测试）
-
-**`syscall_dispatch.c`**
-
-- 实现了高级系统调用分发器
-- 包含完整的参数验证逻辑
-- 实现了权限检查机制
-- 支持错误处理策略
-
-##### 2. **参数处理文件**
-
-**`syscall_args.h` & `syscall_args.c`**
-
-- 实现了类型安全的参数提取函数
-- 支持多种参数类型：int, uint64, ptr, string, buffer
-- 实现了用户指针验证机制
-- 提供了用户空间数据复制功能
-
-##### 3. **错误处理文件**
-
-**`syscall_error.h` & `syscall_error.c`**
-
-- 定义了标准错误码系统
-- 实现了错误处理策略（返回/杀死进程/panic）
-- 提供了错误信息字符串转换
-- 支持动态错误策略配置
-
-##### 4. **系统调用实现文件**
-
-**`sysfunc.h` & `sysfunc.c`**
-
-- 实现了基础系统调用：brk, mmap, munmap, copyin, copyout, copyinstr
-- 包含完整的参数验证和错误处理
-
-**`test_syscall.c`**
-
-- 实现了6个测试系统调用
-- 覆盖了所有框架功能测试
-
-##### 5. **兼容性文件**
-
-**`syscall.h` & `syscall.c`**
-
-- 保持了向后兼容性
-- 提供了新旧两套接口
+```
+struct proc {
+  struct spinlock lock;        // 进程锁
+  enum procstate state;        // 进程状态
+  void *chan;                 // 睡眠通道
+  int killed;                 // 终止标志
+  int xstate;                 // 退出状态
+  int pid;                    // 进程ID
+  struct proc *parent;        // 父进程
+  uint64 kstack;              // 内核栈
+  uint64 sz;                  // 内存大小
+  pagetable_t pagetable;      // 页表
+  struct trapframe *trapframe; // 陷阱帧
+  struct context context;     // 上下文
+  struct file *ofile[NOFILE]; // 打开文件
+  struct inode *cwd;          // 当前目录
+  char name[16];              // 进程名
+};
+```
 
 ------
 
-## **任务** 4：实现基础系统调用
-
-实现操作系统的基础系统调用，包括：
-
-- **进程控制类**：fork, exit, wait, kill, getpid
-- **文件操作类**：open, close, read, write
-- **内存管理类**：sbrk
-
-### 1. **系统调用框架设计与实现**
-
-#### 1.1 系统调用表结构
+## 2. 进程状态转换
 
 ```
-// syscall/syscall.c
+      ①allocproc()        ②scheduler()         ③sleep()
+unused ---------> runnable ---------> running ---------> sleeping
+  ↑                   ↑                  ↓                  ↓
+  │⑦freeproc()        │②wakeup()         │⑤exit()           │④wakeup()
+  │                   │                  ↓                  ↓
+  └─────────────── zombie <──────────── running <──────── runnable
+                      ↑⑥wait()
+```
+
+- **UNUSED**: 进程槽未使用
+- **USED**: 进程正在创建中
+- **RUNNABLE**: 就绪状态，等待调度
+- **RUNNING**: 正在运行
+- **SLEEPING**: 等待某个事件
+- **ZOMBIE**: 已退出，等待父进程回收
+
+**①UNUSED → RUNNABLE (allocproc)**
+
+- 进程创建时，`allocproc()`分配新的进程槽
+- 跳过USED状态，直接设置为RUNNABLE
+
+**②RUNNABLE → RUNNING (scheduler)**
+
+- 调度器选中就绪进程
+- 执行上下文切换
+
+**③RUNNING → SLEEPING (sleep)**
+
+- 进程主动调用`sleep()`等待某个事件
+- 如等待I/O、等待锁等
+
+**④SLEEPING → RUNNABLE (wakeup)**
+
+- 等待的事件发生
+- `wakeup()`唤醒睡眠进程
+
+**⑤RUNNING → ZOMBIE (exit)**
+
+- 进程调用`exit()`终止
+- 保留进程信息等待父进程回收
+
+**⑥ZOMBIE → UNUSED (wait)**
+
+- 父进程调用`wait()`回收子进程
+- 释放进程资源
+
+**⑦特殊情况**
+
+- 某些错误情况下可能直接从ZOMBIE回到UNUSED
+
+------
+
+## 3. 上下文切换机制（swtch.S）
+
+```
+.globl swtch
+swtch:
+        sd ra, 0(a0)
+        sd sp, 8(a0)
+        sd s0, 16(a0)
+        sd s1, 24(a0)
+        sd s2, 32(a0)
+        sd s3, 40(a0)
+        sd s4, 48(a0)
+        sd s5, 56(a0)
+        sd s6, 64(a0)
+        sd s7, 72(a0)
+        sd s8, 80(a0)
+        sd s9, 88(a0)
+        sd s10, 96(a0)
+        sd s11, 104(a0)
+
+        ld ra, 0(a1)
+        ld sp, 8(a1)
+        ld s0, 16(a1)
+        ld s1, 24(a1)
+        ld s2, 32(a1)
+        ld s3, 40(a1)
+        ld s4, 48(a1)
+        ld s5, 56(a1)
+        ld s6, 64(a1)
+        ld s7, 72(a1)
+        ld s8, 80(a1)
+        ld s9, 88(a1)
+        ld s10, 96(a1)
+        ld s11, 104(a1)
+        
+        ret
+```
+
+**关键点**：
+
+- 只保存/恢复callee-saved寄存器
+- 通过修改sp切换栈
+- 通过修改ra改变返回地址
+
+------
+
+## 4. 系统调用接口（sysproc.c）
+
+- `sys_fork()`: 调用`kfork()`创建子进程
+- `sys_exit()`: 调用`kexit()`终止进程
+- `sys_wait()`: 调用`kwait()`等待子进程
+- `sys_kill()`: 调用`kkill()`发送信号
+
+------
+
+## 5. 操作系统进程调度流程
+
+### 5.1 调度器的基本流程
+
+```
+1. 时钟中断触发
+2. 保存当前进程状态
+3. 调用调度器选择下一个进程
+4. 上下文切换到新进程
+5. 新进程开始/继续执行
+```
+
+### 5.2 详细调度过程
+
+#### A. 进程创建（fork）
+
+```
+// 简化的fork流程
+int fork() {
+    struct proc *np = allocproc();  // 分配新进程
+    // 复制父进程内存空间
+    // 复制文件描述符
+    // 设置父子关系
+    np->state = RUNNABLE;           // 设为就绪状态
+    return np->pid;
+}
+```
+
+#### B. 进程调度（scheduler）
+
+```
+// 简化的调度器循环
+void scheduler() {
+    for(;;) {
+        // 遍历进程表
+        for(p = proc; p < &proc[NPROC]; p++) {
+            if(p->state == RUNNABLE) {
+                p->state = RUNNING;
+                c->proc = p;
+                swtch(&c->context, &p->context);  // 上下文切换
+                c->proc = 0;
+            }
+        }
+    }
+}
+```
+
+#### C. 进程退出（exit）
+
+```
+// 简化的exit流程
+void exit(int status) {
+    // 关闭所有文件
+    // 释放内存
+    // 设置退出状态
+    p->xstate = status;
+    p->state = ZOMBIE;
+    wakeup(p->parent);  // 唤醒父进程
+    sched();            // 调度其他进程
+}
+```
+
+### 5.3 调度策略
+
+xv6使用**简单轮转调度**：
+
+- 遍历进程表寻找RUNNABLE进程
+- 按顺序调度，没有优先级
+- 时间片用完或主动让出CPU时切换
+
+### 5.4 同步机制
+
+#### 睡眠/唤醒机制
+
+```
+// 进程睡眠
+void sleep(void *chan, struct spinlock *lk) {
+    p->chan = chan;
+    p->state = SLEEPING;
+    sched();  // 切换到其他进程
+}
+
+// 唤醒等待某个通道的所有进程
+void wakeup(void *chan) {
+    for(p = proc; p < &proc[NPROC]; p++) {
+        if(p->state == SLEEPING && p->chan == chan) {
+            p->state = RUNNABLE;
+        }
+    }
+}
+```
+
+### 5.5 多核调度
+
+每个CPU核心运行独立的调度器：
+
+- 每个CPU有自己的`struct cpu`
+- 进程可以在任意CPU上运行
+- 使用锁保护共享的进程表
+
+------
+
+## RISC-V三种特权模式详解
+
+### 1. 特权级别层次
+
+```
+M-mode (Machine)     - 特权级别最高，可以访问所有硬件
+    ↑
+S-mode (Supervisor)  - 操作系统内核运行的模式
+    ↑  
+U-mode (User)        - 用户程序运行的模式，特权级别最低
+```
+
+### 2. 各模式的职责和权限
+
+#### **M-mode (机器模式)**
+
+- **最高特权级**，可以访问所有硬件资源
+- 职责：
+  - 系统启动和初始化
+  - 处理机器级异常和中断
+  - 管理物理内存保护(PMP)
+  - 处理不能被S-mode处理的异常
+- **典型使用**：bootloader、固件、hypervisor
+
+#### **S-mode (监管者模式)**
+
+- **操作系统内核**运行的模式
+- 职责：
+  - 进程管理和调度
+  - 虚拟内存管理
+  - 系统调用处理
+  - 设备驱动管理
+- **限制**：不能直接访问某些机器级寄存器
+
+#### **U-mode (用户模式)**
+
+- **最低特权级**，用户程序运行模式
+- 限制：
+  - 不能执行特权指令
+  - 不能直接访问硬件
+  - 只能通过系统调用请求内核服务
+
+### 3. 特权模式切换机制
+
+#### **切换触发条件**
+
+**向上切换（提升特权级）**：
+
+1. **系统调用** (U→S): `ecall`指令
+2. **异常** (U→S 或 S→M): 页错误、非法指令等
+3. **中断** (任意→S/M): 时钟中断、外部中断等
+
+**向下切换（降低特权级）**：
+
+1. **异常返回** (S→U): `sret`指令
+2. **机器返回** (M→S): `mret`指令
+
+#### **切换的硬件机制**
+
+**关键CSR寄存器**：
+
+```
+// S-mode相关寄存器
+sstatus    // 状态寄存器，包含SPP(Previous Privilege)位
+sepc       // 异常程序计数器，保存异常发生时的PC
+scause     // 异常原因
+stval      // 异常值
+sscratch   // 临时寄存器
+stvec      // 异常向量表基址
+
+// M-mode相关寄存器  
+mstatus    // 机器状态寄存器
+mepc       // 机器异常程序计数器
+mcause     // 机器异常原因
+mtval      // 机器异常值
+mscratch   // 机器临时寄存器
+mtvec      // 机器异常向量表基址
+```
+
+### 4. 具体切换流程
+
+#### **U-mode → S-mode (系统调用)**
+
+```
+# 用户程序执行
+ecall                    # 触发系统调用
+
+# 硬件自动执行：
+# 1. 保存当前特权级到sstatus.SPP
+# 2. 设置当前特权级为S-mode
+# 3. 保存PC到sepc
+# 4. 跳转到stvec指向的异常处理程序
+# 5. 禁用中断(sstatus.SIE = 0)
+```
+
+#### **S-mode → U-mode (系统调用返回)**
+
+```
+# 内核处理完系统调用后
+sret                     # 返回用户模式
+
+# 硬件自动执行：
+# 1. 从sstatus.SPP恢复之前的特权级
+# 2. 从sepc恢复PC
+# 3. 恢复中断状态
+# 4. 跳转到用户程序继续执行
+```
+
+#### **异常处理流程**
+
+```
+// 1. 硬件保存上下文
+sstatus.SPP = 当前特权级
+sepc = 当前PC
+scause = 异常原因
+stval = 异常相关值
+
+// 2. 跳转到异常处理程序
+PC = stvec
+
+// 3. 软件处理异常
+void trap_handler() {
+    // 保存寄存器到trapframe
+    // 根据scause分发处理
+    // 恢复寄存器
+    // sret返回
+}
+```
+
+### 5. 在操作系统中的应用
+
+#### **典型的执行流程**：
+
+```
+1. 系统启动 (M-mode)
+   ↓
+2. 启动内核 (S-mode)  
+   ↓
+3. 创建用户进程 (U-mode)
+   ↓
+4. 用户程序执行系统调用 (U→S)
+   ↓
+5. 内核处理后返回 (S→U)
+   ↓
+6. 时钟中断触发调度 (U→S)
+   ↓
+7. 进程切换后返回 (S→U)
+```
+
+#### **关键设计要点**：
+
+1. **异常向量表**：`stvec`指向统一的异常入口
+2. **上下文保存**：软件负责保存/恢复通用寄存器
+3. **特权级检查**：硬件自动检查指令执行权限
+4. **内存保护**：通过页表和特权级控制内存访问
+
+------
+
+## 任务 1：上下文切换机制实现
+
+在 RISC-V 架构中，寄存器分为两类：
+
+- **调用者保存寄存器**：`ra, t0-t6, a0-a7`，由调用函数负责保存
+- **被调用者保存寄存器**：`sp, s0-s11`，由被调用函数负责保存
+
+**为什么不保存所有寄存器？**
+
+1. **效率考虑**：调用者保存寄存器在函数调用时已经被保存到栈上
+2. **职责分离**：遵循 RISC-V ABI 规范，避免重复保存
+3. **性能优化**：减少上下文切换的开销
+
+```
 typedef struct {
-    uint64 (*handler)(void);
-    int arg_count;
-    int privilege_level;
-    char name[16];
-} syscall_entry_t;
-
-static syscall_entry_t syscall_table[SYSCALL_TABLE_SIZE];
+    uint64 ra;  // 返回地址 - 进程恢复执行的位置
+    uint64 sp;  // 栈指针 - 内核栈的位置
+    // 被调用者保存寄存器 - 保证函数调用语义正确
+    uint64 s0, s1, s2, s3, s4, s5, s6, s7, s8, s9, s10, s11;
+} context_t;
 ```
 
-#### 1.2 系统调用注册机制
+**设计理由**：
+
+- `ra`：保存进程的返回地址，通常指向 `forkret` 或调度点
+- `sp`：保存内核栈指针，确保栈的连续性
+- `s0-s11`：保存被调用者保存寄存器，维护函数调用约定
+
+**上下文切换函数**
 
 ```
-void register_syscall(int num, uint64 (*handler)(void), 
-                     int arg_count, int privilege, const char* name)
+# proc/swtch.S
+/*
+    上下文切换
+    void swtch(context_t *old, context_t *new);
+*/
+
+.globl swtch
+swtch:
+        sd ra, 0(a0)
+        sd sp, 8(a0)
+        sd s0, 16(a0)
+        sd s1, 24(a0)
+        sd s2, 32(a0)
+        sd s3, 40(a0)
+        sd s4, 48(a0)
+        sd s5, 56(a0)
+        sd s6, 64(a0)
+        sd s7, 72(a0)
+        sd s8, 80(a0)
+        sd s9, 88(a0)
+        sd s10, 96(a0)
+        sd s11, 104(a0)
+
+        ld ra, 0(a1)
+        ld sp, 8(a1)
+        ld s0, 16(a1)
+        ld s1, 24(a1)
+        ld s2, 32(a1)
+        ld s3, 40(a1)
+        ld s4, 48(a1)
+        ld s5, 56(a1)
+        ld s6, 64(a1)
+        ld s7, 72(a1)
+        ld s8, 80(a1)
+        ld s9, 88(a1)
+        ld s10, 96(a1)
+        ld s11, 104(a1)
+        
+        ret
 ```
 
-#### 1.3 参数提取机制
+**内核栈 vs 用户栈**：
+
+- **内核栈**：每个进程独立的内核栈，用于系统调用和中断处理
+- **用户栈**：进程的用户态栈，映射在用户虚拟地址空间
 
 ```
-int get_syscall_arg(int n, long* result);
-int get_user_string(int n, char* dst, size_t max_len);
-int validate_user_ptr(uint64 addr, size_t len);
+// 进程结构中的栈管理
+typedef struct proc {
+    uint64 kstack;          // 内核栈基地址
+    pagetable_t pgtbl;      // 页表，包含用户栈映射
+    trapframe_t *tf;        // 陷阱帧，保存用户态寄存器
+    context_t ctx;          // 内核态上下文
+} proc_t;
 ```
 
-### 2. **错误处理系统**
+**栈切换的关键点**：
 
-#### 2.1 完整的错误码定义
-
-```
-// syscall_error.h
-#define SYSCALL_SUCCESS     0
-#define SYSCALL_EINVAL     -1   // 无效参数
-#define SYSCALL_EFAULT     -2   // 内存访问错误
-#define SYSCALL_EPERM      -3   // 权限不足
-#define SYSCALL_ENOSYS     -4   // 系统调用不存在
-#define SYSCALL_ENOMEM     -5   // 内存不足
-// ... 更多错误码
-```
-
-#### 2.2 多层错误检查
-
-- 参数有效性验证
-- 权限级别检查
-- 系统调用存在性验证
-- 用户指针安全检查
-
-### 3. **具体系统调用实现**
-
-#### 3.1 进程控制类系统调用
-
-```
-// 已实现的系统调用
-uint64 sys_fork(void);    // 创建子进程
-uint64 sys_exit(void);    // 终止进程  
-uint64 sys_wait(void);    // 等待子进程
-uint64 sys_kill(void);    // 发送信号
-uint64 sys_getpid(void);  // 获取进程ID
-```
-
-#### 3.2 文件操作类系统调用
-
-```
-uint64 sys_open(void);    // 打开文件
-uint64 sys_close(void);   // 关闭文件
-uint64 sys_read(void);    // 读文件
-uint64 sys_write(void);   // 写文件
-```
-
-#### 3.3 内存管理类系统调用
-
-```
-uint64 sys_sbrk(void);    // 调整堆大小
-```
-
-### 4. **用户态/内核态切换机制**
-
-#### 4.1 陷阱处理
-
-- 正确识别 `ecall` 指令 (scause=0x8)
-- EPC 自动递增跳过 `ecall`
-- 寄存器状态保存与恢复
-
-#### 4.2 返回机制
-
-- 通过 `sret` 指令返回用户态
-- 返回值通过 `a0` 寄存器传递
-- 状态寄存器正确恢复
-
-### 5. **系统集成**
-
-#### 5.1 与进程管理系统集成
-
-- 进程文件描述符表管理
-- 标准输入/输出/错误初始化
-- 进程权限级别检查
-
-#### 5.2 与文件系统集成
-
-- 文件结构分配与释放
-- 设备文件支持（控制台）
-- 文件描述符管理
-
-#### 5.3 与内存管理系统集成
-
-- 用户指针验证
-- 堆内存管理
-- 页表操作支持
-
-### 测试
-
-死循环：
-
-```
-1. 用户程序从 0x87ffe000 开始执行 (li a7, 20)
-2. 但是 a7 寄存器没有被设置 (值仍为0)
-3. 执行 ecall，触发系统调用
-4. EPC 正确递增到 0x87ffe008
-5. 但返回时，我们强制设置 sepc = 0x87ffe000  // ❌ 错误！
-6. 用户程序又从头开始执行，形成死循环
-```
-
-### ![image-20251110145851860](C:\Users\BOSS0\AppData\Roaming\Typora\typora-user-images\image-20251110145851860.png)
-
-![image-20251110145919492](C:\Users\BOSS0\AppData\Roaming\Typora\typora-user-images\image-20251110145919492.png)
-
-![image-20251110145932294](C:\Users\BOSS0\AppData\Roaming\Typora\typora-user-images\image-20251110145932294.png)
-
-![image-20251110145948796](C:\Users\BOSS0\AppData\Roaming\Typora\typora-user-images\image-20251110145948796.png)
-
-![image-20251110150011215](C:\Users\BOSS0\AppData\Roaming\Typora\typora-user-images\image-20251110150011215.png)
-
-![image-20251110150032705](C:\Users\BOSS0\AppData\Roaming\Typora\typora-user-images\image-20251110150032705.png)
-
-![image-20251110150054284](C:\Users\BOSS0\AppData\Roaming\Typora\typora-user-images\image-20251110150054284.png)
-
-![image-20251110150112819](C:\Users\BOSS0\AppData\Roaming\Typora\typora-user-images\image-20251110150112819.png)
-
-![image-20251110150132596](C:\Users\BOSS0\AppData\Roaming\Typora\typora-user-images\image-20251110150132596.png)
-
-![image-20251110150147273](C:\Users\BOSS0\AppData\Roaming\Typora\typora-user-images\image-20251110150147273.png)
-
-![image-20251110150217133](C:\Users\BOSS0\AppData\Roaming\Typora\typora-user-images\image-20251110150217133.png)
-
-```
-    // === TEST 1: getpid (syscall 20) ===
-    printf("  Test 1: getpid() - syscall 20\n");
-    code_ptr[inst_count++] = 0x01400893;  // li a7, 20 (getpid)
-    code_ptr[inst_count++] = 0x00000073;  // ecall
-
-    // === TEST 2: sbrk (syscall 25) - 扩展堆 ===
-    printf("  Test 2: sbrk(4096) - syscall 25\n");
-    code_ptr[inst_count++] = 0x00001537;  // lui a0, 0x1 (4096)
-    code_ptr[inst_count++] = 0x01900893;  // li a7, 25 (sbrk)
-    code_ptr[inst_count++] = 0x00000073;  // ecall
-
-    // === TEST 3: open (syscall 21) - 打开文件 ===
-    printf("  Test 3: open() - syscall 21\n");
-    code_ptr[inst_count++] = 0x00000513;  // li a0, 0 (简化：使用0作为路径)
-    code_ptr[inst_count++] = 0x00100593;  // li a1, 1 (O_WRONLY)
-    code_ptr[inst_count++] = 0x01500893;  // li a7, 21 (open)
-    code_ptr[inst_count++] = 0x00000073;  // ecall
-
-    // === TEST 4: write (syscall 24) - 写文件 ===
-    printf("  Test 4: write(1, buf, 5) - syscall 24\n");
-    code_ptr[inst_count++] = 0x00100513;  // li a0, 1 (stdout)
-    code_ptr[inst_count++] = 0x00000593;  // li a1, 0 (简化：使用0作为缓冲区)
-    code_ptr[inst_count++] = 0x00500613;  // li a2, 5 (count)
-    code_ptr[inst_count++] = 0x01800893;  // li a7, 24 (write)
-    code_ptr[inst_count++] = 0x00000073;  // ecall
-
-    // === TEST 5: read (syscall 23) - 读文件 ===
-    printf("  Test 5: read(0, buf, 1) - syscall 23\n");
-    code_ptr[inst_count++] = 0x00000513;  // li a0, 0 (stdin)
-    code_ptr[inst_count++] = 0x00000593;  // li a1, 0 (简化：使用0作为缓冲区)
-    code_ptr[inst_count++] = 0x00100613;  // li a2, 1 (count)
-    code_ptr[inst_count++] = 0x01700893;  // li a7, 23 (read)
-    code_ptr[inst_count++] = 0x00000073;  // ecall
-
-    // === TEST 6: close (syscall 22) - 关闭文件 ===
-    printf("  Test 6: close(3) - syscall 22\n");
-    code_ptr[inst_count++] = 0x00300513;  // li a0, 3 (fd)
-    code_ptr[inst_count++] = 0x01600893;  // li a7, 22 (close)
-    code_ptr[inst_count++] = 0x00000073;  // ecall
-
-    // === TEST 7: fork (syscall 16) - 创建子进程 ===
-    printf("  Test 7: fork() - syscall 16\n");
-    code_ptr[inst_count++] = 0x01000893;  // li a7, 16 (fork)
-    code_ptr[inst_count++] = 0x00000073;  // ecall
-
-    // === TEST 8: wait (syscall 18) - 等待子进程 ===
-    printf("  Test 8: wait() - syscall 18\n");
-    code_ptr[inst_count++] = 0x00000513;  // li a0, 0 (status ptr)
-    code_ptr[inst_count++] = 0x01200893;  // li a7, 18 (wait)
-    code_ptr[inst_count++] = 0x00000073;  // ecall
-
-    // === TEST 9: kill (syscall 19) - 发送信号 ===
-    printf("  Test 9: kill(1, 9) - syscall 19\n");
-    code_ptr[inst_count++] = 0x00100513;  // li a0, 1 (pid)
-    code_ptr[inst_count++] = 0x00900593;  // li a1, 9 (SIGKILL)
-    code_ptr[inst_count++] = 0x01300893;  // li a7, 19 (kill)
-    code_ptr[inst_count++] = 0x00000073;  // ecall
-
-    // === TEST 10: exit (syscall 17) - 退出进程 ===
-    printf("  Test 10: exit(0) - syscall 17\n");
-    code_ptr[inst_count++] = 0x00000513;  // li a0, 0 (exit code)
-    code_ptr[inst_count++] = 0x01100893;  // li a7, 17 (exit)
-    code_ptr[inst_count++] = 0x00000073;  // ecall
-```
-
-**测试验证点**
-
-1. **指令生成验证**：确认机器码正确
-2. **寄存器状态验证**：检查 a7 寄存器值
-3. **EPC递增验证**：确认程序计数器正确前进
-4. **系统调用执行验证**：检查返回值和副作用
-5. **资源清理验证**：确认进程正确退出
-
-**具体测试结果**
-
-| 系统调用 | 编号 | 测试结果 | 返回值 | 状态             |
-| -------- | ---- | -------- | ------ | ---------------- |
-| getpid   | 20   | 成功     | 1      | 正确             |
-| sbrk     | 25   | 成功     | -5     | 正确检测冲突     |
-| open     | 21   | 成功     | -2     | 正确处理错误     |
-| write    | 24   | 成功     | -2     | 正确检测无效指针 |
-| read     | 23   | 成功     | -2     | 正确检测无效指针 |
-| close    | 22   | 成功     | -1     | 正确处理无效fd   |
-| fork     | 16   | 成功     | 2      | 返回子进程PID    |
-| wait     | 18   | 成功     | 2      | 模拟等待成功     |
-| kill     | 19   | 成功     | -1     | 正确处理无效PID  |
-| exit     | 17   | 成功     | N/A    | 正确清理并退出   |
+1. **原子性保证**：上下文切换在关中断状态下进行
+2. **栈指针管理**：`sp` 寄存器的保存和恢复确保栈的连续性
+3. **内存安全**：每个进程的内核栈独立分配，避免栈溢出影响其他进程
 
 ------
 
-## 任务 5：实现用户态系统调用接口
+## 任务 2：调度器实现
 
-1. **用户态库函数** → **系统调用桩代码** → **内核系统调用处理**
-2. 用户程序调用 `printf("Hello")` → 最终通过内核的 `write` 系统调用输出
-3. 用户程序调用 `malloc(100)` → 通过内核的 `sbrk` 系统调用分配内存
+采用简单轮转调度（Round Robin）策略：
 
-```
-┌──────────────────────────────────────────────────────────────┐
-│                    用户空间 (User Space)                      │
-├──────────────────────────────────────────────────────────────┤
-│  用户程序 (test.c)                                            │
-│  ┌─────────────────────────────────────────────────────────┐ │
-│  │ int main() {                                            │ │
-│  │     printf("Hello World!\n");  // 用户调用               │ │
-│  │     int pid = fork();          // 用户调用               │ │
-│  │     char *p = malloc(100);     // 用户调用               │ │
-│  │ }                                                       │ │
-│  └─────────────────────────────────────────────────────────┘ │
-│                            ↓                                 │
-│  用户库 (ulib.c, printf.c, umalloc.c)                         │
-│  ┌─────────────────────────────────────────────────────────┐ │
-│  │ void printf(const char *fmt, ...) {                     │ │
-│  │     // 格式化处理                                         │ │
-│  │     write(1, buffer, len);  // 调用系统调用桩             │ │
-│  │ }                                                       │ │
-│  └─────────────────────────────────────────────────────────┘ │
-│                            ↓                                 │
-│  系统调用桩 (usys.S)                                           │
-│  ┌─────────────────────────────────────────────────────────┐ │
-│  │ write:                                                  │ │
-│  │     li a7, 24      # SYS_write 系统调用号                 │ │
-│  │     ecall          # 触发系统调用                         │ │
-│  │     ret                                                 │ │
-│  └─────────────────────────────────────────────────────────┘ │
-└──────────────────────────────────────────────────────────────┘
-                              ↓ ecall (系统调用)
-┌──────────────────────────────────────────────────────────────┐
-│                    内核空间 (Kernel Space)                    │
-├──────────────────────────────────────────────────────────────┤
-│  系统调用处理 (trap/syscall.c)                                 │
-│  ┌─────────────────────────────────────────────────────────┐ │
-│  │ void syscall_handler(struct trapframe *tf) {            │ │
-│  │     int syscall_num = tf->a7;  // 获取系统调用号          │ │
-│  │     switch(syscall_num) {                               │ │
-│  │         case SYS_write:                                 │ │
-│  │             sys_write(tf->a0, tf->a1, tf->a2);          │ │
-│  │             break;                                      │ │
-│  │     }                                                   │ │
-│  │ }                                                       │ │
-│  └─────────────────────────────────────────────────────────┘ │
-│                            ↓                                 │
-│  具体系统调用实现 (syscall/sysfunc.c)                           │
-│  ┌─────────────────────────────────────────────────────────┐ │
-│  │ int sys_write(int fd, char *buf, int n) {               │ │
-│  │     // 实际的写操作                                       │ │
-│  │     return uart_write(buf, n);                          │ │
-│  │ }                                                       │ │
-│  └─────────────────────────────────────────────────────────┘ │
-└──────────────────────────────────────────────────────────────┘
-```
+- **公平性**：每个进程获得相等的 CPU 时间
+- **简单性**：实现简单，易于理解和调试
+- **响应性**：避免进程长时间等待
 
-### **用户程序调用 `printf("Hello")`**：
-
-1. **用户层**：`printf("Hello")` (printf.c)
-2. **格式化**：处理格式字符串
-3. **系统调用**：`write(1, "Hello", 5)` (printf.c 调用)
-4. **桩代码**：`li a7, 24; ecall` (usys.S)
-5. **内核陷入**：CPU 切换到内核模式
-6. **系统调用分发**：根据 a7=24 找到 sys_write
-7. **内核执行**：实际的写操作
-8. **返回用户**：结果返回给用户程序
-
-### 系统调用框架
-
-- **系统调用表管理**：实现了32个系统调用槽位的注册和管理
-- **参数传递机制**：通过寄存器 a0-a7 传递参数
-- **权限检查**：支持不同权限级别的系统调用
-- **错误处理**：统一的错误返回机制
-
-### 内存管理系统调用
-
-- **sbrk()**：动态调整进程堆大小
-- **mmap()/munmap()**：内存映射管理
-- **brk()**：设置程序断点
-
-### 文件系统调用
-
-- **open()**：打开文件或设备
-- **close()**：关闭文件描述符
-- **read()/write()**：文件读写操作
-- **标准I/O**：支持 stdin/stdout/stderr
-
-### 进程控制系统调用
-
-- **fork()**：创建子进程（简化实现）
-- **exit()**：进程退出和资源清理
-- **wait()**：等待子进程结束
-- **getpid()**：获取进程ID
-- **kill()**：进程信号处理
-
-### 用户态C库实现
-
-- **malloc()/free()**：动态内存分配
-- **字符串函数**：strcpy, strlen, strcmp等
-- **printf()**：格式化输出
-- **系统调用封装**：用户态系统调用接口
-
-### 系统调用机制
+**调度器核心逻辑**
 
 ```
-// 系统调用注册
-syscall_register(SYS_sbrk, sys_sbrk, 1, 0);
-syscall_register(SYS_open, sys_open, 2, 0);
-
-// 系统调用处理
-uint64 syscall_handler(uint64 syscall_num, uint64 a0, uint64 a1, ...)
-```
-
-### 内存管理
-
-```
-// sbrk系统调用实现
-uint64 sys_sbrk(void) {
-    // 动态调整堆大小
-    // 分配物理页面
-    // 映射到用户页表
-}
-```
-
-### 用户程序加载
-
-- **多页面支持**：支持大于4KB的用户程序
-- **内存布局**：代码段、数据段、堆、栈的合理布局
-- **权限设置**：不同内存区域的访问权限控制
-
-### 内存布局
-
-```
-用户态虚拟地址空间：
-0x1000-0x2000: 代码段第1页 (R+X)
-0x2000-0x3000: 代码段第2页 (R+W+X)
-0x3000-0x4000: 堆起始区域
-0x4000-0x5000: 堆扩展区域
-...
-0x10000-0x11000: 用户栈
-```
-
-### 系统调用流程
-
-```
-用户程序 → ecall指令 → trap_handler → syscall_handler → 具体系统调用 → 返回用户态
-```
-
-### 问题
-
-**问题描述**：编译后的测试程序超过4KB，超出单页限制
-
-```
-panic: Test program too large for single page
-```
-
-**解决方案**：
-
-- 实现多页面程序加载机制
-- 动态计算所需页面数量
-- 正确设置不同页面的访问权限
-
-```
-uint32 pages_needed = (program_size + PGSIZE - 1) / PGSIZE;
-for (uint32 i = 0; i < pages_needed; i++) {
-    // 分配和映射多个页面
-}
-```
-
-**问题描述**：malloc访问内存时发生页面错误
-
-```
-❌ Unexpected user trap: scause=0xd, sepc=0x1978, stval=0x3008
-```
-
-**解决方案**：
-
-- 为代码页的后续页面添加写权限
-- 区分纯代码页和代码+数据页的权限设置
-
-```
-uint64 pte_flags;
-if (i == 0) {
-    pte_flags = PTE_R | PTE_X | PTE_U;  // 只读+可执行
-} else {
-    pte_flags = PTE_R | PTE_W | PTE_X | PTE_U;  // 可读写执行
-}
-```
-
-**问题描述**：堆扩展时与用户栈地址冲突
-
-```
-sys_sbrk: failed to map page at va=0x4000
-```
-
-**解决方案**：
-
-- 重新设计用户态内存布局
-- 将栈地址移到更远的位置（64KB处）
-- 确保堆和栈之间有足够的空间
-
-```
-uint64 ustack_va = 0x10000;  // 栈放在64KB处
-p->heap_top = code_end_va;    // 堆紧跟代码段
-```
-
-### 测试
-
-```
-int main() {
-    // 1. 基本系统调用测试
-    printf("Testing basic system calls...\n");
-    int pid = getpid();
+void scheduler(void) {
+    proc_t *p;
+    cpu_t *c = mycpu();
     
-    // 2. 字符串函数测试
-    printf("Testing string functions...\n");
-    strcpy(buf, "Hello World");
+    c->proc = 0;
     
-    // 3. 内存分配测试
-    printf("Testing memory allocation...\n");
-    char *ptr = malloc(100);
-    
-    // 4. 文件操作测试
-    printf("Testing file operations...\n");
-    int fd = open("/dev/console", O_WRONLY);
-    
-    // 5. 进程控制测试
-    printf("Testing process control...\n");
-    int child_pid = fork();
-}
-```
-
-![image-20251110215916425](C:\Users\BOSS0\AppData\Roaming\Typora\typora-user-images\image-20251110215916425.png)
-
-![image-20251110215932191](C:\Users\BOSS0\AppData\Roaming\Typora\typora-user-images\image-20251110215932191.png)
-
-| 功能模块     | 测试项目             | 备注             |
-| ------------ | -------------------- | ---------------- |
-| 系统调用框架 | 25个系统调用注册     | 完全成功         |
-| 内存管理     | sbrk动态堆管理       | 支持堆扩展和收缩 |
-| 内存分配     | malloc/free          | 完整的堆分配器   |
-| 文件操作     | open/write/close     | 支持设备文件     |
-| 进程控制     | fork/wait/exit       | 简化版本实现     |
-| 字符串处理   | strcpy/strlen/strcmp | 完整C库支持      |
-| 程序退出     | 资源清理             | 正确清理所有资源 |
-
-------
-
-## 任务 6：系统调用安全性
-
-1. **实现安全检查函数**
-   - 创建用户指针验证函数
-   - 实现缓冲区边界检查
-   - 添加权限验证机制
-2. **加固现有系统调用**
-   - 在每个系统调用入口添加安全检查
-   - 验证所有用户传入的参数
-   - 防止恶意参数导致的系统崩溃
-3. **防止竞态条件**
-   - 识别可能的竞态条件场景
-   - 实现原子操作和锁机制
-   - 确保多核环境下的安全性
-4. **安全测试**
-   - 编写恶意测试用例
-   - 验证安全机制的有效性
-   - 确保系统在攻击下仍能正常运行
-
-### 1. 指针验证
-
-```
-// security.c 中的实现
-int security_check_user_ptr(uint64 ptr, uint32 size, int perm) {
-    // 1.  检查指针是否在用户地址空间
-    if (ptr == 0) {
-        printf("Security: NULL pointer access\n");
-        return -1;
+    for(;;) {
+        // 开启中断，允许设备中断和时钟中断
+        intr_on();
+        
+        // 遍历进程表，寻找可运行进程
+        for (p = proc_table; p < &proc_table[MAX_PROC]; p++) {
+            spinlock_acquire(&p->lock);
+            
+            if (p->state == PROC_RUNNABLE) {
+                // 状态转换：RUNNABLE → RUNNING
+                p->state = PROC_RUNNING;
+                c->proc = p;
+                
+                // 为首次运行的进程初始化上下文
+                if (p->ctx.sp == 0) {
+                    p->ctx.sp = p->kstack;
+                    p->ctx.ra = (uint64)forkret;
+                }
+                
+                // 执行上下文切换
+                swtch(&c->ctx, &p->ctx);
+                
+                // 进程返回后清理
+                c->proc = 0;
+            }
+            
+            spinlock_release(&p->lock);
+        }
     }
-    
-    if (ptr >= KERNEL_BASE) {
-        printf("Security: attempt to access kernel space 0x%lx\n", ptr);
-        return -1;
-    }
-    
-    // 2.  检查内存区域权限和映射
-    // 3.  检查越界访问
-}
-
-int validate_user_ptr(uint64 ptr, uint32 size) {
-    // 额外的指针验证层
 }
 ```
 
-**测试结果**：
+#### 中断管理
 
--  NULL 指针被成功拦截：`Security: NULL pointer access`
--  内核地址被成功拦截：`Security: attempt to access kernel space 0x80000000`
+**为什么需要开启中断？**
 
-### 2. 缓冲区保护 
+1. **设备响应**：允许设备中断处理 I/O 请求
+2. **时钟中断**：支持抢占式调度（虽然当前实现主要是协作式）
+3. **系统响应性**：避免系统完全无响应
+
+#### 锁机制
 
 ```
-// 防止缓冲区溢出
-int security_check_buffer_size(uint32 size) {
-    if (size > MAX_BUFFER_SIZE) {
-        printf("Security: buffer size %d exceeds limit %d\n", size, MAX_BUFFER_SIZE);
-        return -1;
-    }
+// 进程锁的使用模式
+spinlock_acquire(&p->lock);  // 获取进程锁
+// 检查和修改进程状态
+if (p->state == PROC_RUNNABLE) {
+    p->state = PROC_RUNNING;
+    // 执行上下文切换
+}
+spinlock_release(&p->lock);  // 释放进程锁
+```
+
+**锁的作用**：
+
+- 保护进程状态的原子性修改
+- 防止多 CPU 同时调度同一进程
+- 确保进程状态的一致性
+
+#### 主动调度
+
+```
+// yield() - 主动让出 CPU
+uint64 sys_yield(void) {
+    yield();
     return 0;
 }
 
-// 限制数据传输大小
-if (count > 256) {
-    printf("console_write: limiting size from %d to 256\n", n);
-    n = 256;
+void yield(void) {
+    proc_t *p = myproc();
+    spinlock_acquire(&p->lock);
+    p->state = PROC_RUNNABLE;
+    sched();  // 切换到调度器
+    spinlock_release(&p->lock);
 }
 ```
 
-**测试结果**：
+#### 被动调度
 
--  大缓冲区被限制到安全大小
--  字符串处理有长度限制
--  数据传输大小被控制
+进程在以下情况下被动调度：
 
-### 3. 权限检查 
+- **系统调用阻塞**：如 `sys_wait` 中的 `sleep`
+- **进程退出**：`sys_exit` 后进程变为僵尸状态
+- **资源等待**：等待 I/O 或其他资源
+
+------
+
+## 任务 3：进程同步原语实现
+
+Sleep/Wakeup 是一种条件变量机制：
+
+- **Sleep**：进程等待某个条件满足时主动阻塞
+- **Wakeup**：条件满足时唤醒等待的进程
+- **Channel**：使用内存地址作为等待通道标识
 
 ```
-// 文件访问权限检查
-if (!f->writable) {
-    printf("sys_write: file not writable\n");
-    return -1;
+// sleep() - 进程阻塞等待
+void sleep(void *chan, spinlock_t *lk) {
+    proc_t *p = myproc();
+    
+    // 必须持有进程锁
+    spinlock_acquire(&p->lock);
+    
+    // 释放传入的锁（避免死锁）
+    spinlock_release(lk);
+    
+    // 设置等待通道和状态
+    p->wait_chan = chan;
+    p->state = PROC_SLEEPING;
+    
+    // 让出 CPU
+    sched();
+    
+    // 被唤醒后清理
+    p->wait_chan = 0;
+    spinlock_release(&p->lock);
+    
+    // 重新获取原来的锁
+    spinlock_acquire(lk);
 }
 
-// 文件描述符权限检查
-if (argfd(0, &fd, &f) < 0) {
-    printf("sys_write: argfd failed\n");
-    return -1;
+// wakeup() - 唤醒等待进程
+void wakeup(void *chan) {
+    for (proc_t *p = proc_table; p < &proc_table[MAX_PROC]; p++) {
+        if (p != myproc() && p->pid > 0) {
+            spinlock_acquire(&p->lock);
+            
+            if (p->state == PROC_SLEEPING && p->wait_chan == chan) {
+                p->state = PROC_RUNNABLE;  // 唤醒进程
+                p->wait_chan = 0;
+            }
+            
+            spinlock_release(&p->lock);
+        }
+    }
 }
 ```
 
-**测试结果**：
+**问题描述**：如果在检查条件和调用 `sleep` 之间发生了 `wakeup`，进程可能永远不会被唤醒。
 
--  无效文件描述符被拒绝：`Test 5: Invalid fd - PASS (rejected)`
--  文件权限检查正常工作
--  进程操作权限验证
+**解决方案**：
 
-### 4. 竞态条件防护 
+1. **锁保护**：在检查条件和调用 `sleep` 之间持有锁
+2. **原子操作**：`sleep` 函数原子地释放锁并阻塞进程
+3. **锁传递**：将锁传递给 `sleep` 函数处理
 
 ```
-// TOCTTOU 攻击防护和原子操作
-int security_check_atomic_operation(int fd, int operation) {
-    // 原子性检查实现
+// sys_wait 中的使用示例
+uint64 sys_wait(void) {
+    proc_t *p = myproc();
+    
+    spinlock_acquire(&wait_lock);
+    
+    for (;;) {
+        // 检查是否有僵尸子进程
+        int havekids = 0;
+        for (child = proc_table; child < &proc_table[MAX_PROC]; child++) {
+            if (child->parent == p) {
+                havekids = 1;
+                if (child->state == PROC_ZOMBIE) {
+                    // 找到僵尸子进程，清理并返回
+                    int pid = child->pid;
+                    // 清理子进程...
+                    spinlock_release(&wait_lock);
+                    return pid;
+                }
+            }
+        }
+        
+        if (!havekids) {
+            spinlock_release(&wait_lock);
+            return -1;  // 没有子进程
+        }
+        
+        // 等待子进程退出
+        sleep(p, &wait_lock);  // 在 wait_lock 保护下睡眠
+    }
+}
+```
+
+### 管道
+
+#### 1. 数据结构定义
+
+**`include/fs/file.h`** 中定义管道结构：
+
+```
+struct pipe {
+    spinlock_t lock;
+    char data[512];     // 环形缓冲区
+    uint32 nread;       // 已读取的字节数
+    uint32 nwrite;      // 已写入的字节数
+    int readopen;       // 读端是否打开
+    int writeopen;      // 写端是否打开
+};
+```
+
+#### 2. 核心函数实现
+
+**`kernel/fs/pipe.c`**：
+
+| 函数          | 功能                             |
+| ------------- | -------------------------------- |
+| `pipealloc()` | 分配管道和两个文件结构           |
+| `pipeclose()` | 关闭管道端，两端都关闭时释放内存 |
+| `pipewrite()` | 写入数据，满时睡眠等待           |
+| `piperead()`  | 读取数据，空时睡眠等待           |
+
+#### 3. 系统调用集成
+
+- **`sys_pipe()`**：创建管道，返回两个文件描述符
+- 修改 **`fileread()`** / **`filewrite()`** / **`fileclose()`** 支持管道类型
+
+#### 4. 用户接口
+
+- 系统调用号：`SYS_pipe = 22`
+- 用户函数：`int pipe(int fd[2])`
+
+#### 测试
+
+```
+#include "common.h"
+#include "sys.h"
+
+void _start(void) {
+    int pipefd[2];
+    
+    // 创建管道
+    if (pipe(pipefd) < 0) {
+        exit(-1);
+    }
+    
+    int pid = fork();
+    if (pid == 0) {
+        // 子进程：写入数据
+        close(pipefd[0]);
+        int data = 42;
+        write(pipefd[1], &data, sizeof(data));
+        close(pipefd[1]);
+        exit(0);
+    } else if (pid > 0) {
+        // 父进程：读取数据
+        close(pipefd[1]);
+        int data = 0;
+        read(pipefd[0], &data, sizeof(data));
+        close(pipefd[0]);
+        
+        int status;
+        wait(&status);
+        
+        exit(data);  // 应该返回 42
+    } else {
+        exit(-1);
+    }
+}
+```
+
+![image-20251121162740602](C:\Users\BOSS0\AppData\Roaming\Typora\typora-user-images\image-20251121162740602.png)
+
+![image-20251121162754555](C:\Users\BOSS0\AppData\Roaming\Typora\typora-user-images\image-20251121162754555.png)
+
+![image-20251121162812177](C:\Users\BOSS0\AppData\Roaming\Typora\typora-user-images\image-20251121162812177.png)
+
+![image-20251121162827090](C:\Users\BOSS0\AppData\Roaming\Typora\typora-user-images\image-20251121162827090.png)
+
+![image-20251121162859211](C:\Users\BOSS0\AppData\Roaming\Typora\typora-user-images\image-20251121162859211.png)
+
+![image-20251121162914222](C:\Users\BOSS0\AppData\Roaming\Typora\typora-user-images\image-20251121162914222.png)
+
+![image-20251121162926571](C:\Users\BOSS0\AppData\Roaming\Typora\typora-user-images\image-20251121162926571.png)
+
+1. 管道创建成功 
+
+```
+sys_pipe: creating pipe
+pipealloc: pipe allocated successfully
+sys_pipe: allocated fd0=3 (read), fd1=4 (write)
+```
+
+2. 进程 fork 成功 
+
+```
+sys_fork: parent PID=2 creating child
+sys_fork: child PID=3 created successfully
+```
+
+3. 子进程写入数据 
+
+```
+pipewrite: writing 4 bytes
+pipewrite: wrote 4 bytes
+```
+
+4. 父进程阻塞等待数据 
+
+```
+piperead: reading up to 4 bytes
+piperead: no data, sleeping
+```
+
+5. 子进程退出，唤醒父进程 
+
+```
+sys_exit: process new_proc (PID=3) exiting with status 0
+pipeclose: write end closed
+```
+
+6. 父进程读取成功 
+
+```
+sleep: [WOKE UP] - sched() returned!
+piperead: read 4 bytes
+```
+
+7. 父进程以 data (42) 退出 
+
+```
+sys_exit: process init (PID=2) exiting with status 42
+```
+
+管道的**生产者-消费者同步**工作：
+
+| 时间线 | 父进程 (PID=2)      | 子进程 (PID=3)    |
+| ------ | ------------------- | ----------------- |
+| T1     | 创建管道 fd=3,4     | -                 |
+| T2     | fork 子进程         | 被创建            |
+| T3     | close(4), read(3)   | close(3)          |
+| T4     | **睡眠等待数据**    | write(4, 42)      |
+| T5     | -                   | close(4), exit(0) |
+| T6     | **被唤醒，读取 42** | -                 |
+| T7     | wait(), exit(42)    | 被回收            |
+
+------
+
+1. **进程在 `sleep()` 中获取锁**
+2. **调用 `sched()` 时锁仍被持有**
+3. **切换到调度器，锁仍被持有**
+4. **调度器找到可运行进程，切换回去**
+5. **进程从 `sched()` 返回，锁仍被持有**
+6. **`sleep()` 正确释放锁**
+
+**yield 系统调用**
+
+**yield** 是一个**主动让出 CPU** 的系统调用，它的作用是：
+
+1. **协作式调度**：进程主动放弃当前的 CPU 时间片
+2. **提高响应性**：让其他进程有机会运行
+3. **避免独占 CPU**：防止计算密集型任务长时间占用 CPU
+4. **测试调度器**：验证进程调度机制是否正常工作
+
+**yield 的工作原理**
+
+```
+void yield(void) {
+    proc_t *p = myproc();           // 获取当前进程
+    spinlock_acquire(&p->lock);     // 获取进程锁
+    p->state = PROC_RUNNABLE;       // 状态：RUNNING → RUNNABLE
+    sched();                        // 切换到调度器
+    spinlock_release(&p->lock);     // 释放进程锁（恢复时执行）
+}
+```
+
+**执行流程**：
+
+1. 当前进程调用 `yield()`
+2. 进程状态从 `RUNNING` 变为 `RUNNABLE`
+3. 调用 `sched()` 切换到调度器
+4. 调度器选择其他可运行的进程
+5. 当前进程重新被调度时，从 `sched()` 返回
+6. 释放锁，继续执行
+
+------
+
+## 测试
+
+### 测试1：基础 fork/wait 测试
+
+```
+// user/simple_test.c - 基础测试版本
+#include "sys.h"
+
+void _start(void) {
+    int pid = fork();
+    if (pid == 0) {
+        exit(42);
+    } else {
+        int status;
+        wait(&status);
+        exit(0);
+    }
+}
+```
+
+![image-20251121145202464](C:\Users\BOSS0\AppData\Roaming\Typora\typora-user-images\image-20251121145202464.png)
+
+![image-20251121145218601](C:\Users\BOSS0\AppData\Roaming\Typora\typora-user-images\image-20251121145218601.png)
+
+![image-20251121145236401](C:\Users\BOSS0\AppData\Roaming\Typora\typora-user-images\image-20251121145236401.png)
+
+![image-20251121145306097](C:\Users\BOSS0\AppData\Roaming\Typora\typora-user-images\image-20251121145306097.png)
+
+![image-20251121145318940](C:\Users\BOSS0\AppData\Roaming\Typora\typora-user-images\image-20251121145318940.png)
+
+### 测试2：调度器测试
+
+```
+// user/simple_test.c - 调度器测试版本
+#include "sys.h"
+
+void cpu_intensive_task(int task_id) {
+    volatile int sum = 0;
+    
+    for (int i = 0; i < 50000; i++) {
+        sum += i * i;
+        
+        if (i % 10000 == 0) {
+            yield();  // 主动让出CPU
+        }
+    }
+    
+    exit(task_id + 10);  // 退出码: 10, 11, 12
 }
 
-// 锁的正确使用
-spinlock_acquire(&ftable_lock);
-// 原子操作
-spinlock_release(&ftable_lock);
-```
-
-**测试结果**：
-
--  原子操作检查正常工作
--  锁机制正确实现
--  TOCTTOU 防护到位
-
-**系统调用安全检查**
-
-**用户指针验证**
-
-**缓冲区溢出保护**
-
-**权限检查**
-
-**原子操作保护**
-
-```
-#include "user.h"
-
-int main() {
-    // 最简单的测试
-    write(1, "=== Simple Security Test ===\n", 30);
-    
-    // 测试1：基本写入
-    write(1, "Test 1: Basic write\n", 20);
-    char msg[] = "Hello World\n";
-    int result = write(1, msg, 12);
-    write(1, "Result: ", 8);
-    if (result == 12) {
-        write(1, "PASS\n", 5);
-    } else {
-        write(1, "FAIL\n", 5);
+void _start(void) {
+    // 创建3个计算密集型进程
+    for (int i = 0; i < 3; i++) {
+        int pid = fork();
+        
+        if (pid == 0) {
+            cpu_intensive_task(i);
+        } else if (pid < 0) {
+            exit(-1);
+        }
     }
     
-    // 测试2：NULL指针测试
-    write(1, "Test 2: NULL pointer\n", 21);
-    result = write(1, (void*)0, 10);
-    write(1, "Result: ", 8);
-    if (result == -1) {
-        write(1, "PASS (rejected)\n", 16);
-    } else {
-        write(1, "FAIL (should reject)\n", 21);
+    // 等待所有子进程
+    for (int i = 0; i < 3; i++) {
+        int status;
+        wait(&status);
     }
-    
-    // 测试3：内核地址测试
-    write(1, "Test 3: Kernel address\n", 23);
-    result = write(1, (void*)0x80000000, 10);
-    write(1, "Result: ", 8);
-    if (result == -1) {
-        write(1, "PASS (rejected)\n", 16);
-    } else {
-        write(1, "FAIL (should reject)\n", 21);
-    }
-    
-    // 测试4：零长度写入
-    write(1, "Test 4: Zero length\n", 20);
-    result = write(1, msg, 0);
-    write(1, "Result: ", 8);
-    if (result == 0) {
-        write(1, "PASS\n", 5);
-    } else {
-        write(1, "FAIL\n", 5);
-    }
-    
-    // 测试5：无效文件描述符
-    write(1, "Test 5: Invalid fd\n", 19);
-    result = write(-1, msg, 5);
-    write(1, "Result: ", 8);
-    if (result == -1) {
-        write(1, "PASS (rejected)\n", 16);
-    } else {
-        write(1, "FAIL (should reject)\n", 21);
-    }
-    
-    write(1, "=== All Tests Completed ===\n", 29);
     
     exit(0);
 }
 ```
 
-![image-20251111202829647](C:\Users\BOSS0\AppData\Roaming\Typora\typora-user-images\image-20251111202829647.png)
+| 功能                   | 状态 | 说明                           |
+| ---------------------- | ---- | ------------------------------ |
+| **多进程创建**         | 通过 | 3 个子进程全部创建成功         |
+| **并发执行**           | 通过 | 进程在 CPU 上交替执行          |
+| **调度公平性**         | 通过 | 轮转调度，每个进程都有机会运行 |
+| **`yield()` 系统调用** | 通过 | 主动让出 CPU 正常工作          |
+| **计算密集型任务**     | 通过 | 50000 次循环正常完成           |
+| **进程退出**           | 通过 | 退出码正确传递                 |
+| **父进程等待**         | 通过 | `wait()` 正确获取子进程状态    |
+| **资源回收**           | 通过 | 所有进程资源正确释放           |
 
-![image-20251111202843241](C:\Users\BOSS0\AppData\Roaming\Typora\typora-user-images\image-20251111202843241.png)
+![image-20251121153123728](C:\Users\BOSS0\AppData\Roaming\Typora\typora-user-images\image-20251121153123728.png)
 
-![image-20251111202900697](C:\Users\BOSS0\AppData\Roaming\Typora\typora-user-images\image-20251111202900697.png)
+![image-20251121153136193](C:\Users\BOSS0\AppData\Roaming\Typora\typora-user-images\image-20251121153136193.png)
 
-![image-20251111202914306](C:\Users\BOSS0\AppData\Roaming\Typora\typora-user-images\image-20251111202914306.png)
+![image-20251121153150328](C:\Users\BOSS0\AppData\Roaming\Typora\typora-user-images\image-20251121153150328.png)
 
-![image-20251111202924108](C:\Users\BOSS0\AppData\Roaming\Typora\typora-user-images\image-20251111202924108.png)
+![image-20251121153206352](C:\Users\BOSS0\AppData\Roaming\Typora\typora-user-images\image-20251121153206352.png)
+
+![image-20251121153222308](C:\Users\BOSS0\AppData\Roaming\Typora\typora-user-images\image-20251121153222308.png)
+
+![image-20251121153233702](C:\Users\BOSS0\AppData\Roaming\Typora\typora-user-images\image-20251121153233702.png)
+
+![image-20251121153249289](C:\Users\BOSS0\AppData\Roaming\Typora\typora-user-images\image-20251121153249289.png)
+
+![image-20251121153303951](C:\Users\BOSS0\AppData\Roaming\Typora\typora-user-images\image-20251121153303951.png)
+
+![image-20251121153317784](C:\Users\BOSS0\AppData\Roaming\Typora\typora-user-images\image-20251121153317784.png)
+
+![image-20251121153329045](C:\Users\BOSS0\AppData\Roaming\Typora\typora-user-images\image-20251121153329045.png)
+
+![image-20251121153340583](C:\Users\BOSS0\AppData\Roaming\Typora\typora-user-images\image-20251121153340583.png)
+
+![image-20251121153358179](C:\Users\BOSS0\AppData\Roaming\Typora\typora-user-images\image-20251121153358179.png)
+
+![image-20251121153412294](C:\Users\BOSS0\AppData\Roaming\Typora\typora-user-images\image-20251121153412294.png)
+
+![image-20251121153423541](C:\Users\BOSS0\AppData\Roaming\Typora\typora-user-images\image-20251121153423541.png)
+
+![image-20251121153434472](C:\Users\BOSS0\AppData\Roaming\Typora\typora-user-images\image-20251121153434472.png)
+
+![image-20251121153452741](C:\Users\BOSS0\AppData\Roaming\Typora\typora-user-images\image-20251121153452741.png)
+
+![image-20251121153500471](C:\Users\BOSS0\AppData\Roaming\Typora\typora-user-images\image-20251121153500471.png)
+
+### 测试3：同步机制测试
+
+```
+#include "common.h"
+#include "sys.h"
+
+#define NUM_ITEMS 20
+
+void _start(void);  // 前置声明
+
+// ========================================
+// 主函数（必须在最前面）
+// ========================================
+void _start(void) {
+    int pipefd[2];
+    
+    // 创建管道
+    if (pipe(pipefd) < 0) {
+        exit(-1);
+    }
+    
+    int read_fd = pipefd[0];
+    int write_fd = pipefd[1];
+    
+    // 创建生产者进程
+    int pid1 = fork();
+    if (pid1 == 0) {
+        // 子进程1：生产者
+        close(read_fd);
+        
+        // 写入 0-19 到管道
+        for (int i = 0; i < NUM_ITEMS; i++) {
+            write(write_fd, &i, sizeof(i));
+            
+            // 模拟生产时间
+            for (volatile int j = 0; j < 10000; j++);
+            
+            // 偶尔让出 CPU
+            if (i % 5 == 0) {
+                yield();
+            }
+        }
+        
+        close(write_fd);
+        exit(0);  // 生产者退出码 0
+        
+    } else if (pid1 < 0) {
+        exit(-2);
+    }
+    
+    // 创建消费者进程
+    int pid2 = fork();
+    if (pid2 == 0) {
+        // 子进程2：消费者
+        close(write_fd);
+        
+        int data;
+        int count = 0;
+        int sum = 0;
+        
+        // 从管道读取数据
+        while (read(read_fd, &data, sizeof(data)) == sizeof(data)) {
+            sum += data;
+            count++;
+            
+            // 模拟消费时间
+            for (volatile int j = 0; j < 10000; j++);
+            
+            // 偶尔让出 CPU
+            if (count % 5 == 0) {
+                yield();
+            }
+        }
+        
+        close(read_fd);
+        
+        // 验证：count 应该是 20，sum 应该是 190 (0+1+...+19)
+        // 返回 count 作为退出码
+        exit(count);
+        
+    } else if (pid2 < 0) {
+        exit(-3);
+    }
+    
+    // 父进程：关闭两端并等待子进程
+    close(read_fd);
+    close(write_fd);
+    
+    // 等待两个子进程
+    int status1, status2;
+    wait(&status1);  // 等待第一个结束的子进程
+    wait(&status2);  // 等待第二个结束的子进程
+    
+    // 其中一个是生产者（返回 0），另一个是消费者（返回 20）
+    int consumer_count = (status1 > status2) ? status1 : status2;
+    
+    // 返回消费者读取的数量（期望 20）
+    exit(consumer_count);
+}
+```
+
+```
+1. 管道创建 ✅
+sys_pipe: allocated fd0=3 (read), fd1=4 (write)
+
+2. 进程创建 ✅
+sys_fork: child PID=3 created successfully  # 生产者
+sys_fork: child PID=4 created successfully  # 消费者
+
+3. 生产者写入 20 次 ✅
+pipewrite: wrote 4 bytes  (×20)
+
+4. 消费者读取 20 次 ✅
+piperead: read 4 bytes  (×20)
+
+5. 同步机制验证 ✅
+消费者阻塞等待：
+piperead: no data, sleeping
+sleep: [START] PID=4 on chan=0x803dd218
+生产者写入后，消费者被唤醒：
+sleep: [WOKE UP] - sched() returned!
+piperead: read 4 bytes
+
+6. EOF 检测 ✅
+生产者关闭写端：
+pipeclose: write end closed
+消费者检测到 EOF：
+piperead: read 0 bytes
+fileread: returning 0 bytes
+
+7. 退出状态正确 ✅
+sys_exit: process (PID=3) exiting with status 0   # 生产者
+sys_exit: process (PID=4) exiting with status 20  # 消费者（count=20）
+sys_exit: process (PID=2) exiting with status 20  # 父进程返回消费者结果
+```
+
+1. **生产者-消费者模型**
+
+- 生产者：写入 20 个整数（0-19）
+- 消费者：读取并计数
+
+2. **同步机制**
+
+- 管道空时，消费者自动睡眠
+- 管道满时（512 字节），生产者会睡眠（当前数据量小，不会触发）
+- 写端关闭后，消费者读到 EOF（返回 0）
+
+3. **并发执行**
+
+- 使用 `yield()` 模拟抢占式调度
+- 生产和消费交替进行
+
+4. **资源清理**
+
+- 管道两端都关闭后自动释放
+- 子进程退出后被父进程回收
+
+### 测试4：进程树测试
+
+```
+// user/simple_test.c - 进程树测试版本
+#include "sys.h"
+
+void _start(void) {
+    int child1 = fork();
+    if (child1 == 0) {
+        // 子进程创建孙进程
+        int grandchild1 = fork();
+        if (grandchild1 == 0) {
+            exit(31);  // 孙进程1
+        } else if (grandchild1 > 0) {
+            int grandchild2 = fork();
+            if (grandchild2 == 0) {
+                exit(32);  // 孙进程2
+            } else if (grandchild2 > 0) {
+                int status1, status2;
+                wait(&status1);
+                wait(&status2);
+                exit(21);  // 子进程1
+            } else {
+                exit(-31);
+            }
+        } else {
+            exit(-21);
+        }
+    } else if (child1 > 0) {
+        int child2 = fork();
+        if (child2 == 0) {
+            exit(22);  // 子进程2
+        } else if (child2 > 0) {
+            int status1, status2;
+            wait(&status1);
+            wait(&status2);
+            exit(0);  // 父进程
+        } else {
+            exit(-22);
+        }
+    } else {
+        exit(-1);
+    }
+}
+```
+
+```
+           PID=2 (init)
+          /            \
+      PID=3          PID=4
+      /    \
+  PID=5  PID=6
+```
+
+1. **PID=2 创建两个子进程**：
+   - `sys_fork: parent PID=2 creating child` → PID=3
+   - `sys_fork: parent PID=2 creating child` → PID=4
+2. **PID=3 创建两个孙进程**：
+   - `sys_fork: parent PID=3 creating child` → PID=5
+   - `sys_fork: parent PID=3 creating child` → PID=6
+3. **孙进程先退出**：
+   - `sys_exit: process new_proc (PID=5) exiting with status 31` 
+   - `sys_exit: process new_proc (PID=6) exiting with status 32` 
+4. **PID=3 等待并回收孙进程**：
+   - `sys_wait: found zombie child PID=5, exit_status=31` 
+   - `sys_wait: found zombie child PID=6, exit_status=32` 
+5. **PID=3 退出**：
+   - `sys_exit: process new_proc (PID=3) exiting with status 21` 
+6. **PID=4 退出**：
+   - `sys_exit: process new_proc (PID=4) exiting with status 22` 
+7. **PID=2 回收所有子进程**：
+   - `sys_wait: found zombie child PID=4, exit_status=22` 
+   - `sys_wait: found zombie child PID=3, exit_status=21` 
+8. **PID=2 退出**：
+   - `sys_exit: process init (PID=2) exiting with status 0` 
+
+![image-20251121145837091](C:\Users\BOSS0\AppData\Roaming\Typora\typora-user-images\image-20251121145837091.png)
+
+![image-20251121145855184](C:\Users\BOSS0\AppData\Roaming\Typora\typora-user-images\image-20251121145855184.png)
+
+![image-20251121145914745](C:\Users\BOSS0\AppData\Roaming\Typora\typora-user-images\image-20251121145914745.png)
+
+![image-20251121145929192](C:\Users\BOSS0\AppData\Roaming\Typora\typora-user-images\image-20251121145929192.png)
+
+![image-20251121145945015](C:\Users\BOSS0\AppData\Roaming\Typora\typora-user-images\image-20251121145945015.png)
+
+![image-20251121150012047](C:\Users\BOSS0\AppData\Roaming\Typora\typora-user-images\image-20251121150012047.png)
+
+![image-20251121150025668](C:\Users\BOSS0\AppData\Roaming\Typora\typora-user-images\image-20251121150025668.png)
+
+![image-20251121150038826](C:\Users\BOSS0\AppData\Roaming\Typora\typora-user-images\image-20251121150038826.png)
+
+![image-20251121150056544](C:\Users\BOSS0\AppData\Roaming\Typora\typora-user-images\image-20251121150056544.png)
+
+![image-20251121150109703](C:\Users\BOSS0\AppData\Roaming\Typora\typora-user-images\image-20251121150109703.png)
+
+![image-20251121150123507](C:\Users\BOSS0\AppData\Roaming\Typora\typora-user-images\image-20251121150123507.png)
+
+![image-20251121150137286](C:\Users\BOSS0\AppData\Roaming\Typora\typora-user-images\image-20251121150137286.png)
+
+![image-20251121150154709](C:\Users\BOSS0\AppData\Roaming\Typora\typora-user-images\image-20251121150154709.png)
+
+![image-20251121150212284](C:\Users\BOSS0\AppData\Roaming\Typora\typora-user-images\image-20251121150212284.png)
+
+![image-20251121150227082](C:\Users\BOSS0\AppData\Roaming\Typora\typora-user-images\image-20251121150227082.png)
+
+### 测试5：压力测试
+
+```
+// user/simple_test.c - 压力测试版本
+#include "sys.h"
+
+void _start(void) {
+    const int num_children = 5;
+    
+    for (int i = 0; i < num_children; i++) {
+        int pid = fork();
+        
+        if (pid == 0) {
+            volatile int sum = 0;
+            int work_amount = (i + 1) * 20000;
+            
+            for (int j = 0; j < work_amount; j++) {
+                sum += j;
+                if (j % 5000 == 0) {
+                    yield();
+                }
+            }
+            
+            exit(i + 50);  // 退出码: 50-54
+        } else if (pid < 0) {
+            break;
+        }
+    }
+    
+    // 等待所有子进程
+    int completed = 0;
+    int status;
+    while (wait(&status) > 0) {
+        completed++;
+    }
+    
+    exit(completed);
+}
+```
+
+1. 创建了 5 个子进程
+
+```
+sys_fork: child PID=3 created successfully
+sys_fork: child PID=4 created successfully
+sys_fork: child PID=5 created successfully
+sys_fork: child PID=6 created successfully
+sys_fork: child PID=7 created successfully
+```
+
+2. 最终退出码是 5
+
+```
+exit_code=5
+```
+
+**说明父进程成功等待并回收了 5 个子进程**
 
 ------
 
 ## 思考题
 
-### 1. 设计权衡
+### 1. 调度策略
 
-**系统调用的数量应该如何确定？**
+#### 轮转调度的公平性如何？
 
-- **最小化原则**：只提供必要的核心功能，避免功能重复
-- **完整性考虑**：覆盖所有基本操作（进程、文件、内存、网络）
-- **性能影响**：系统调用表大小影响查找效率
-- **维护成本**：每个系统调用都需要测试和维护
-- **建议**：Linux有300+个，我们的教学系统30-50个足够
+**公平性分析：**
 
-**如何平衡功能性和安全性？**
+- **优点**：每个进程获得相等的时间片，简单公平
+- 缺点：
+  - 不区分 I/O 密集型和 CPU 密集型进程
+  - 不考虑进程优先级
+  - 交互式进程响应可能较慢
+
+**改进方案**：
 
 ```
-// 功能性 vs 安全性的权衡示例
-int sys_write(void) {
-    // 功能性：快速路径
-    if (simple_case) {
-        return fast_write();
+// 多级反馈队列
+struct proc {
+    int priority;      // 优先级 0-3
+    int time_slice;    // 剩余时间片
+    int cpu_burst;     // CPU 使用统计
+};
+
+// 动态调整优先级
+void adjust_priority(proc_t *p) {
+    if (p->cpu_burst > THRESHOLD) {
+        p->priority--;  // CPU 密集型降低优先级
+    } else {
+        p->priority++;  // I/O 密集型提高优先级
     }
+}
+```
+
+#### 如何实现实时调度？
+
+**实时调度要求**：任务必须在截止时间内完成
+
+**实现方案**：
+
+```
+// 实时进程结构
+struct rt_proc {
+    uint64 deadline;     // 截止时间
+    uint64 period;       // 周期
+    int rt_priority;     // 实时优先级 (0-99)
+};
+
+// EDF (Earliest Deadline First) 调度
+proc_t* edf_schedule(void) {
+    proc_t *earliest = NULL;
+    uint64 min_deadline = UINT64_MAX;
     
-    // 安全性：完整检查
-    if (security_check_user_ptr() != 0) return -1;
-    if (security_check_buffer_size() != 0) return -1;
-    if (security_check_atomic_operation() != 0) return -1;
-    
-    return secure_write();
+    for (proc_t *p = procs; p < &procs[NPROC]; p++) {
+        if (p->state == RUNNABLE && p->is_realtime) {
+            if (p->deadline < min_deadline) {
+                min_deadline = p->deadline;
+                earliest = p;
+            }
+        }
+    }
+    return earliest;
 }
 ```
 
 ### 2. 性能优化
 
-**系统调用的主要开销在哪里？**
+#### fork() 的性能瓶颈如何解决？
 
-1. **上下文切换**（最大开销）：保存/恢复寄存器状态
-2. **页表切换**：用户页表 ↔ 内核页表
-3. **参数验证**：用户指针检查、权限验证
-4. **锁竞争**：多核环境下的同步开销
-5. **缓存失效**：TLB、指令缓存、数据缓存
+**当前瓶颈**：复制整个地址空间
 
-**如何减少用户态/内核态切换开销？**
+**解决方案：写时复制 (Copy-on-Write)**
 
 ```
-// 1. 批量操作
-int sys_writev(struct iovec *iov, int iovcnt);  // 一次调用写多个缓冲区
+// 1. fork 时只复制页表，共享物理页
+int fork_cow(void) {
+    proc_t *child = proc_alloc();
+    
+    // 复制页表，但物理页共享
+    for (va = 0; va < parent->sz; va += PGSIZE) {
+        pte_t *pte = walk(parent->pagetable, va);
+        uint64 pa = PTE2PA(*pte);
+        
+        // 标记为只读
+        *pte &= ~PTE_W;
+        *pte |= PTE_COW;  // COW 标志
+        
+        // 子进程映射到同一物理页
+        map_page(child->pagetable, va, pa, flags & ~PTE_W);
+        
+        // 增加引用计数
+        page_ref[pa / PGSIZE]++;
+    }
+    return child->pid;
+}
 
-// 2. 用户空间缓存
-// 将频繁访问的数据映射到用户空间
-
-// 3. 快速系统调用路径
-// 对简单操作使用专门的快速路径
-
-// 4. VDSO (Virtual Dynamic Shared Object)
-// 将简单系统调用实现在用户空间
+// 2. 写入时触发缺页异常，再复制
+void cow_fault(uint64 va) {
+    pte_t *pte = walk(myproc()->pagetable, va);
+    uint64 old_pa = PTE2PA(*pte);
+    
+    if (page_ref[old_pa / PGSIZE] > 1) {
+        // 复制页面
+        uint64 new_pa = kalloc();
+        memmove((void*)new_pa, (void*)old_pa, PGSIZE);
+        page_ref[old_pa / PGSIZE]--;
+        
+        // 更新映射
+        *pte = PA2PTE(new_pa) | PTE_W | (flags & ~PTE_COW);
+    } else {
+        // 只有一个引用，直接设为可写
+        *pte |= PTE_W;
+        *pte &= ~PTE_COW;
+    }
+}
 ```
 
-### 3. 安全考虑
+#### 上下文切换开销如何降低？
 
-**如何防止系统调用被滥用？**
+**优化方法**：
 
 ```
-// 1. 资源限制
-struct rlimit {
-    uint64 rlim_cur;  // 当前限制
-    uint64 rlim_max;  // 最大限制
+// 1. 减少保存的寄存器数量
+// 只保存 callee-saved 寄存器 (s0-s11, ra, sp)
+
+// 2. 使用轻量级线程
+// 同一进程内的线程共享地址空间，切换时不需要切换页表
+void thread_switch(thread_t *from, thread_t *to) {
+    // 不需要: sfence.vma, 不需要切换 satp
+    swtch(&from->ctx, &to->ctx);  // 只切换寄存器
+}
+
+// 3. 批量处理系统调用
+// 减少用户态/内核态切换次数
+struct syscall_batch {
+    int calls[16];
+    uint64 args[16][6];
+    int count;
 };
 
-// 2. 权限检查
-int check_permission(int operation, struct file *f) {
-    if (!current_process->has_permission(operation)) {
-        return -EPERM;
+// 4. 延迟 TLB 刷新
+// 使用 ASID 避免每次切换都刷新 TLB
+#define MAKE_SATP_ASID(pt, asid) (SATP_SV39 | ((asid) << 44) | ((uint64)(pt) >> 12))
+```
+
+### 3. 资源管理
+
+#### 如何实现进程资源限制？
+
+```
+// 资源限制结构
+struct rlimit {
+    uint64 max_memory;      // 最大内存 (bytes)
+    uint64 max_files;       // 最大文件描述符数
+    uint64 max_cpu_time;    // 最大 CPU 时间 (ticks)
+    uint64 max_children;    // 最大子进程数
+};
+
+struct proc {
+    // ... 其他字段
+    struct rlimit limits;
+    uint64 used_memory;
+    uint64 used_cpu_time;
+    int num_children;
+};
+
+// 检查资源限制
+int check_limit(proc_t *p, int resource, uint64 request) {
+    switch (resource) {
+        case RLIMIT_MEMORY:
+            if (p->used_memory + request > p->limits.max_memory)
+                return -1;  // 超出限制
+            break;
+        case RLIMIT_NPROC:
+            if (p->num_children >= p->limits.max_children)
+                return -1;
+            break;
     }
     return 0;
 }
 
-// 3. 频率限制
-int rate_limit_check(int syscall_num) {
-    static int call_count[MAX_SYSCALLS];
-    if (call_count[syscall_num]++ > MAX_CALLS_PER_SEC) {
-        return -EAGAIN;
+// setrlimit 系统调用
+int sys_setrlimit(int resource, struct rlimit *rlim) {
+    proc_t *p = myproc();
+    // 只能降低限制，不能提高（除非是 root）
+    if (rlim->max_memory > p->limits.max_memory && p->uid != 0)
+        return -1;
+    p->limits = *rlim;
+    return 0;
+}
+```
+
+#### 如何处理进程资源泄漏？
+
+```
+// 1. 进程退出时强制清理
+void exit(int status) {
+    proc_t *p = myproc();
+    
+    // 关闭所有文件
+    for (int fd = 0; fd < NOFILE; fd++) {
+        if (p->ofile[fd]) {
+            fileclose(p->ofile[fd]);
+            p->ofile[fd] = NULL;
+        }
     }
-    return 0;
-}
-```
-
-**如何设计安全的参数传递机制？**
-
-```
-// 1. 完整的指针验证
-int validate_user_buffer(const void *ptr, size_t size, int perm) {
-    if (!ptr || size == 0) return -EINVAL;
-    if (ptr >= KERNEL_BASE) return -EFAULT;
-    if (!check_user_pages(ptr, size, perm)) return -EFAULT;
-    return 0;
+    
+    // 释放所有内存
+    proc_free_memory(p);
+    
+    // 释放信号量、锁等
+    release_all_locks(p);
+    
+    // 子进程交给 init
+    reparent_children(p);
 }
 
-// 2. 参数大小限制
-#define MAX_PATH_LEN 4096
-#define MAX_BUFFER_SIZE (1024*1024)
+// 2. 定期检查孤儿进程
+void reaper_thread(void) {
+    while (1) {
+        for (proc_t *p = procs; p < &procs[NPROC]; p++) {
+            if (p->state == ZOMBIE && p->parent == NULL) {
+                proc_free(p);  // 回收孤儿僵尸进程
+            }
+        }
+        sleep_ms(1000);  // 每秒检查一次
+    }
+}
 
-// 3. 字符串安全处理
-int copy_string_from_user(char *dst, const char *src, size_t max_len) {
-    return strncpy_from_user(dst, src, max_len);
+// 3. 资源引用计数
+struct file {
+    int ref;      // 引用计数
+    // ...
+};
+
+void fileclose(struct file *f) {
+    if (--f->ref == 0) {
+        // 真正释放资源
+        kfree(f);
+    }
 }
 ```
 
 ### 4. 扩展性
 
-**如何添加新的系统调用？**
+#### 如何支持多核调度？
 
 ```
-// 1. 系统调用表扩展
-static uint64 (*syscalls[])(void) = {
-    [SYS_fork]    = sys_fork,
-    [SYS_exit]    = sys_exit,
-    // ... 现有系统调用
-    [SYS_new_feature] = sys_new_feature,  // 新增
-};
-
-// 2. 版本化支持
-struct syscall_info {
-    int version;
-    uint64 (*handler)(void);
-};
-
-// 3. 特性检测
-int sys_get_features(void) {
-    return FEATURE_NEW_SYSCALL | FEATURE_SECURITY_V2;
-}
-```
-
-**如何保持向后兼容性？**
-
-```
-// 1. 系统调用号不重用
-#define SYS_old_call  42  // 废弃但保留
-#define SYS_new_call  100 // 新的实现
-
-// 2. 参数结构版本化
-struct stat_v1 { /* 旧版本 */ };
-struct stat_v2 { /* 新版本 */ };
-
-int sys_stat(const char *path, void *buf, int version) {
-    switch (version) {
-        case 1: return stat_v1(path, buf);
-        case 2: return stat_v2(path, buf);
-        default: return -EINVAL;
-    }
-}
-```
-
-### 5. 错误处理
-
-**系统调用失败时应该如何处理？**
-
-```
-// 1. 标准化错误码
-#define EPERM    1   // 权限不足
-#define ENOENT   2   // 文件不存在
-#define EINVAL   22  // 参数无效
-#define EFAULT   14  // 地址错误
-
-// 2. 错误恢复
-int sys_write(void) {
-    // 保存状态
-    save_state();
+// 每个 CPU 有独立的调度队列
+struct cpu {
+    int id;
+    proc_t *proc;           // 当前运行的进程
+    context_t ctx;          // 调度器上下文
+    struct spinlock lock;   // CPU 锁
     
-    int result = do_write();
-    if (result < 0) {
-        // 恢复状态
-        restore_state();
-        return result;
-    }
-    
-    return result;
-}
-```
-
-**如何向用户程序报告详细的错误信息？**
-
-```
-// 1. errno 机制
-extern int errno;
-
-int write(int fd, const void *buf, size_t count) {
-    int result = syscall(SYS_write, fd, buf, count);
-    if (result < 0) {
-        errno = -result;  // 设置错误码
-        return -1;
-    }
-    return result;
-}
-
-// 2. 扩展错误信息
-struct extended_error {
-    int error_code;
-    char message[256];
-    uint64 context_info;
+    // 本地运行队列
+    proc_t *runqueue[NPROC];
+    int runqueue_size;
 };
 
-int sys_get_last_error(struct extended_error *err);
+struct cpu cpus[NCPU];
+
+// 获取当前 CPU
+struct cpu* mycpu(void) {
+    int id = r_tp();  // 读取 hart ID
+    return &cpus[id];
+}
+
+// 多核调度器
+void scheduler(void) {
+    struct cpu *c = mycpu();
+    
+    while (1) {
+        intr_on();
+        
+        acquire(&c->lock);
+        
+        // 先从本地队列选择
+        proc_t *p = NULL;
+        if (c->runqueue_size > 0) {
+            p = c->runqueue[--c->runqueue_size];
+        }
+        
+        if (p == NULL) {
+            // 本地队列空，尝试窃取
+            p = steal_from_other_cpu();
+        }
+        
+        if (p) {
+            p->state = RUNNING;
+            c->proc = p;
+            swtch(&c->ctx, &p->ctx);
+            c->proc = NULL;
+        }
+        
+        release(&c->lock);
+    }
+}
 ```
 
-------
+#### 如何实现负载均衡？
 
-## 
+```
+// 1. 工作窃取 (Work Stealing)
+proc_t* steal_from_other_cpu(void) {
+    int my_id = mycpu()->id;
+    
+    for (int i = 0; i < NCPU; i++) {
+        if (i == my_id) continue;
+        
+        struct cpu *other = &cpus[i];
+        acquire(&other->lock);
+        
+        // 窃取一半的任务
+        if (other->runqueue_size > 1) {
+            int steal_count = other->runqueue_size / 2;
+            proc_t *stolen = other->runqueue[--other->runqueue_size];
+            release(&other->lock);
+            return stolen;
+        }
+        
+        release(&other->lock);
+    }
+    return NULL;
+}
+
+// 2. 负载统计和迁移
+struct load_info {
+    int runnable_count;     // 可运行进程数
+    uint64 cpu_usage;       // CPU 使用率
+    uint64 last_update;     // 上次更新时间
+};
+
+void balance_load(void) {
+    // 找到负载最重和最轻的 CPU
+    int max_cpu = 0, min_cpu = 0;
+    int max_load = 0, min_load = INT_MAX;
+    
+    for (int i = 0; i < NCPU; i++) {
+        int load = cpus[i].runqueue_size;
+        if (load > max_load) { max_load = load; max_cpu = i; }
+        if (load < min_load) { min_load = load; min_cpu = i; }
+    }
+    
+    // 负载差异超过阈值时迁移
+    if (max_load - min_load > 2) {
+        migrate_process(&cpus[max_cpu], &cpus[min_cpu]);
+    }
+}
+
+// 3. CPU 亲和性
+struct proc {
+    uint64 cpu_affinity;  // 位图，表示可以运行在哪些 CPU 上
+};
+
+int can_run_on(proc_t *p, int cpu_id) {
+    return (p->cpu_affinity >> cpu_id) & 1;
+}
+
+// 设置 CPU 亲和性
+int sys_sched_setaffinity(int pid, uint64 mask) {
+    proc_t *p = find_proc(pid);
+    if (p) {
+        p->cpu_affinity = mask;
+        return 0;
+    }
+    return -1;
+}
+```
+
+### 总结
+
+| 问题       | 核心解决思路                   |
+| ---------- | ------------------------------ |
+| 轮转公平性 | 多级反馈队列 + 动态优先级      |
+| 实时调度   | EDF/RM 算法 + 优先级抢占       |
+| fork 性能  | 写时复制 (COW)                 |
+| 上下文切换 | ASID、批量系统调用、轻量级线程 |
+| 资源限制   | rlimit 结构 + 检查点           |
+| 资源泄漏   | 引用计数 + 强制清理            |
+| 多核调度   | Per-CPU 运行队列               |
+| 负载均衡   | 工作窃取 + 定期迁移            |

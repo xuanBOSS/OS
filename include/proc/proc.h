@@ -4,6 +4,7 @@
 #include "common.h"
 #include "memlayout.h"
 #include "lib/lock.h"
+#include "mem/vmem.h" 
 
 // 前向声明，避免循环依赖
 struct file;
@@ -93,39 +94,41 @@ typedef struct trapframe {
 
 // 进程结构
 typedef struct proc {
-    spinlock_t lock;                // 进程锁
+    // ========== 第一部分：基本信息 ==========
+    spinlock_t lock;
+    int pid;
+    proc_state_t state;
+    int privilege_level;
+    char name[16];
     
-    // 基本信息
-    int pid;                        // 进程ID
-    proc_state_t state;             // 进程状态
-    char name[16];                  // 进程名
-    int privilege_level;            // 特权级别
+    // ========== 第二部分：内存管理 ==========
+    pgtbl_t pgtbl;
+    uint64 kstack;
+    trapframe_t *tf;
+    uint64 heap_top;
+    int ustack_pages;
     
-    // 内存管理
-    pgtbl_t pgtbl;                 // 用户页表 (修改：使用 pgtbl_t)
-    uint64 kstack;                 // 内核栈
-    trapframe_t *tf;               // 陷阱帧 (修改：使用具体类型)
-    uint64 heap_top;               // 堆顶指针
-    int ustack_pages;              // 用户栈页数
-
-    context_t ctx;                 // 内核上下文（用于进程切换）
-    void* wait_chan;               // 等待通道
-    int killed;                    // 是否被杀死
-    struct proc* next;             // 链表指针
+    // ========== 第三部分：进程关系 ==========
+    struct proc* parent;
+    struct proc* children;
+    struct proc* sibling;
+    int exit_code;
     
-    // 进程关系
-    struct proc* parent;           // 父进程
-    struct proc* children;         // 子进程链表
-    struct proc* sibling;          // 兄弟进程链表
-    int exit_code;                 // 退出码
+    // ========== 第四部分：同步相关 ==========
+    void* wait_chan;
+    int killed;
+    struct proc* next;
     
-    // 文件系统
-    struct file* ofile[NOFILE];    // 打开的文件表
-    struct inode* cwd;             // 当前工作目录
+    // ========== 第五部分：文件系统 ==========
+    struct file* ofile[NOFILE];
+    struct inode* cwd;
     
-    // 信号处理（简化版）
-    uint64 pending_signals;        // 待处理信号
-    uint64 signal_mask;            // 信号掩码
+    // ========== 第六部分：信号处理 ==========
+    uint64 pending_signals;
+    uint64 signal_mask;
+    
+    // ========== 第七部分：上下文（放在最后！） ==========
+    context_t ctx;  // ✅ 移到最后，避免被覆盖
     
 } proc_t;
 
@@ -138,11 +141,38 @@ typedef struct proc {
 
 // 全局变量声明
 extern proc_t proczero;            // 第一个进程
+extern proc_t proc_table[MAX_PROC];     // 进程表
+extern proc_t *initproc;                // init进程指针
+extern struct spinlock wait_lock;       // wait系统调用锁
 
 // 函数声明
 void     proc_init(void);                         // 初始化进程管理系统
 void     proc_make_first();                        // 创建第一个进程并切换到它执行
 pgtbl_t  proc_pgtbl_init(uint64 trapframe);       // 进程页表的初始化和基本映射
-proc_t*  myproc(void);                            // 获取当前进程
+proc_t*  myproc(void);       
+proc_t*  proc_alloc(void);                        // 分配新进程
+void     proc_free(proc_t* p);                    // 释放进程资源                     // 获取当前进程
+
+int proc_copy_memory(proc_t *parent, proc_t *child);
+void proc_copy_files(proc_t *parent, proc_t *child);
+void proc_free_memory(proc_t *p);
+proc_t* find_child(proc_t *parent, int pid);
+void wakeup(void *chan);
+void sleep(void *chan, struct spinlock *lk);
+void forkret(void);
+void sched(void);
+
+char* safestrcpy(char *s, const char *t, int n);
+int argint(int n, int *ip);
+int argaddr(int n, uint64 *ip);
+int copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len);
+void proc_freepagetable(pagetable_t pagetable, uint64 sz);  
+void swtch(context_t *old, context_t *new);                 
+void scheduler(void);                                       
+
+void validate_stack_pointer(proc_t *p);
+void check_stack_usage(const char* location);
+void debug_context_size(void);
+void debug_proc_pointer(const char *location);
 
 #endif

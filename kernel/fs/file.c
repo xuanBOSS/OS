@@ -146,8 +146,7 @@ void fileclose(struct file *f)
     printf("fileclose: closing file type %d\n", ff.type);
     
     if (ff.type == FD_PIPE_E) {
-        printf("fileclose: pipe close (not implemented)\n");
-        // pipeclose(ff.pipe, ff.writable);
+        pipeclose(ff.pipe, ff.writable);
     } else if (ff.type == FD_INODE_E || ff.type == FD_DEVICE_E) {
         if (ff.ip) {
             iput(ff.ip);
@@ -174,9 +173,9 @@ int fileread(struct file *f, uint64 addr, int n)
     printf("fileread: reading %d bytes from file type %d\n", n, f->type);
     
     if (f->type == FD_PIPE_E) {
-        printf("fileread: pipe read (not implemented)\n");
-        r = -1;
+        r = piperead(f->pipe, addr, n);
     } else if (f->type == FD_DEVICE_E) {
+        // ... 设备代码保持不变
         if (f->major < 0 || f->major >= NDEV || !devsw[f->major].read) {
             printf("fileread: invalid device %d\n", f->major);
             return -1;
@@ -184,6 +183,7 @@ int fileread(struct file *f, uint64 addr, int n)
         printf("fileread: reading from device %d\n", f->major);
         r = devsw[f->major].read(1, addr, n);
     } else if (f->type == FD_INODE_E) {
+        // ... inode 代码保持不变
         if (!f->ip) {
             printf("fileread: null inode pointer\n");
             return -1;
@@ -253,9 +253,9 @@ int filewrite(struct file *f, uint64 addr, int n)
     printf("filewrite: writing %d bytes to file type %d\n", n, f->type);
     
     if (f->type == FD_PIPE_E) {
-        printf("filewrite: pipe write (not implemented)\n");
-        ret = -1;
+        ret = pipewrite(f->pipe, addr, n);
     } else if (f->type == FD_DEVICE_E) {
+        // ... 设备代码保持不变
         if (f->major < 0 || f->major >= NDEV || !devsw[f->major].write) {
             printf("filewrite: invalid device %d\n", f->major);
             return -1;
@@ -615,4 +615,24 @@ int holdingsleeplock(struct sleeplock *lk)
     r = lk->locked && (lk->pid == 1);  // 简化：使用固定PID
     spinlock_release(&lk->lk);
     return r;
+}
+
+struct inode* idup(struct inode *ip) {
+    if (!ip) {
+        printf("idup: null inode pointer\n");
+        return NULL;
+    }
+    
+    spinlock_acquire(&inode_lock);
+    if (ip->ref < 1) {
+        spinlock_release(&inode_lock);
+        printf("idup: invalid reference count %d for inode %d\n", ip->ref, ip->inum);
+        return NULL;
+    }
+    
+    ip->ref++;
+    spinlock_release(&inode_lock);
+    
+    printf("idup: duplicated inode %d, new ref count = %d\n", ip->inum, ip->ref);
+    return ip;
 }

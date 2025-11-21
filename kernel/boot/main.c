@@ -153,14 +153,19 @@ if (vector_offset == 0) {
         
         proc_make_first();
         
-        // 如果到达这里说明出错了
-        panic("main: proc_make_first() returned unexpectedly");
+        // ✅ 启动调度器（永不返回）
+        printf("\n=== Starting Scheduler ===\n");
+        scheduler();
+        
+        // 永远不会到这里
+        panic("main: scheduler returned unexpectedly");
     } else {
-        // 其他 CPU 进入等待状态
-        printf("CPU %d: entering idle loop\n", mycpuid());
-        while(1) {
-            asm volatile("wfi");
-        }
+        // 其他 CPU 也启动调度器
+        printf("CPU %d: starting scheduler\n", mycpuid());
+        scheduler();
+        
+        // 永远不会到这里
+        //panic("main: CPU %d scheduler returned unexpectedly", mycpuid());
     }
     
     return 0;

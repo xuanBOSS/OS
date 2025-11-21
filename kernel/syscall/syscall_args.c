@@ -132,3 +132,37 @@ bool is_user_accessible(uint64 addr, size_t size, bool write)
     }
     return true;
 }
+
+int argint(int n, int *ip) {
+    long arg;
+    int result = get_syscall_arg(n, &arg);
+    if (result == SYSCALL_SUCCESS) {
+        *ip = (int)arg;
+    }
+    return result;
+}
+
+int argaddr(int n, uint64 *ip) {
+    long arg;
+    int result = get_syscall_arg(n, &arg);
+    if (result == SYSCALL_SUCCESS) {
+        *ip = (uint64)arg;
+    }
+    return result;
+}
+
+int copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len) {
+    if (!pagetable || !src) {
+        return -1;  // 参数错误
+    }
+    
+    // 简单验证目标地址是否可访问
+    if (va_to_pa(pagetable, dstva) == 0) {
+        return -1;  // 目标页面未映射
+    }
+    
+    // 调用 uvm_copyout
+    uvm_copyout(pagetable, dstva, (uint64)src, len);
+    
+    return 0;  // 假设成功
+}

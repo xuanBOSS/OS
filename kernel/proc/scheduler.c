@@ -106,19 +106,6 @@ int in_interrupt_context(void) {
     return 0;  // 不在中断上下文中
 }
 
-// === 主动让出CPU ===
-void yield(void) {
-    scheduler_stats.voluntary_yields++;
-    
-    // 确保调度的原子性
-    if (!should_reschedule()) {
-        return;
-    }
-    
-    // 调用调度器
-    schedule();
-}
-
 // === 核心调度函数 ===
 void schedule(void) {
     int cpuid = mycpuid();
@@ -202,26 +189,4 @@ void print_scheduler_stats(void) {
                cpu_scheduler_states[i].timeslice_length);
     }
     printf("=============================\n");
-}
-
-// ✅ 新增：调度器测试函数
-void scheduler_test(void) {
-    printf("\n=== Scheduler Test ===\n");
-    
-    printf("Testing yield()...\n");
-    yield();
-    
-    printf("Testing trigger_reschedule()...\n");
-    trigger_reschedule();
-    
-    printf("Testing should_reschedule()...\n");
-    int can_schedule = should_reschedule();
-    printf("Can schedule: %s\n", can_schedule ? "yes" : "no");
-    
-    printf("Testing update_process_timeslice()...\n");
-    update_process_timeslice();
-    
-    print_scheduler_stats();
-    
-    printf("======================\n");
 }

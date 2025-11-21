@@ -14,5 +14,6 @@ int    strcmp(const char* s1, const char* s2);
 int    strncmp(const char* s1, const char* s2, uint64 n);
 char*  strchr(const char* s, int c);
 char*  strrchr(const char* s, int c);
+char*  safestrcpy(char* dst, const char* src, int n);
 
 #endif

@@ -4,7 +4,7 @@ include common.mk
 KERN = kernel
 USER = user
 KERNEL_ELF = kernel-qemu
-CPUNUM = 3
+CPUNUM = 1
 FS_IMG = none
 
 .PHONY: clean build qemu qemu-gdb user-build kernel-build help

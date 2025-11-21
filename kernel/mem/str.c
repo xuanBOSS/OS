@@ -126,3 +126,12 @@ char* strrchr(const char* s, int c)
     }
     return (c == '\0') ? (char*)s : (char*)last;
 }
+
+char* safestrcpy(char* dst, const char* src, int n) {
+    char* os = dst;
+    if (n <= 0) return os;
+    while (--n > 0 && (*dst++ = *src++) != 0)
+        ;
+    *dst = 0;
+    return os;
+}

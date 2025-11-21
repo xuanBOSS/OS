@@ -18,16 +18,26 @@ static uint64 (*syscalls[])(void) = {
     [SYS_copyout]       sys_copyout,
     [SYS_copyinstr]     sys_copyinstr,
     
-    [16]                sys_fork,      // fork
-    [17]                sys_exit,      // exit
-    [18]                sys_wait,      // wait
-    [19]                sys_kill,      // kill
-    [20]                sys_getpid,    // getpid
-    [21]                sys_open,      // open
-    [22]                sys_close,     // close
-    [23]                sys_read,      // read
-    [24]                sys_write,     // write
-    [25]                sys_sbrk,      // sbrk
+    // 进程控制类
+    [SYS_fork]          sys_fork,
+    [SYS_exit]          sys_exit,
+    [SYS_wait]          sys_wait,
+    [SYS_kill]          sys_kill,
+    [SYS_getpid]        sys_getpid,
+    [SYS_yield]         sys_yield,
+    
+    // 文件操作类
+    [SYS_pipe]          sys_pipe,
+    [SYS_open]          sys_open,
+    [SYS_close]         sys_close,
+    [SYS_read]          sys_read,
+    [SYS_write]         sys_write,
+    
+    // 内存管理类
+    [SYS_sbrk]          sys_sbrk,
+    
+    // 其他
+    //[SYS_getppid]       sys_getppid,  // 如果实现了的话
 };
 
 // ✅ 修复：移除硬编码测试，使用正常的系统调用处理

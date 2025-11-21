@@ -27,4 +27,25 @@ typedef long syscall_arg_t;
 #define __syscall(...) __SYSCALL_DISP(__syscall, __VA_ARGS__)
 #define syscall(...) __syscall(__VA_ARGS__)
 
+typedef int pid_t;
+
+// 进程控制
+extern int fork(void);
+extern int exit(int) __attribute__((noreturn));  // ✅ 改为 int
+extern int wait(int* status);
+extern int getpid(void);
+extern int getppid(void);
+extern void yield(void);                         // ✅ 改为 void
+
+// 文件操作
+extern int pipe(int*);                           // ✅ 新增
+extern int open(const char*, int);
+extern int close(int);
+extern int read(int fd, void* buf, int count);
+extern int write(int fd, const void* buf, int count);
+
+// 内存管理
+extern char* sbrk(int increment);                // ✅ 改为 char*
+
+
 #endif // __SYSCALL_H__

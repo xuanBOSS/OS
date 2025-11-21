@@ -3,6 +3,7 @@
 
 #include "common.h"
 #include "syscall/syscall_table.h"
+#include "mem/vmem.h"
 
 // 参数提取结果
 typedef struct {
@@ -27,5 +28,9 @@ arg_result_t extract_buffer_arg(int n, void *buf, int size);
 bool validate_user_ptr(uint64 ptr, size_t size);
 bool validate_user_string(uint64 ptr, size_t max_len);
 bool is_user_accessible(uint64 addr, size_t size, bool write);
+
+int argint(int n, int *ip);
+int argaddr(int n, uint64 *ip);
+int copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len);
 
 #endif

@@ -15,6 +15,15 @@ typedef unsigned long long     uint64;
 
 typedef unsigned long long     reg; 
 
+typedef int8                   int8_t;
+typedef int16                  int16_t;
+typedef int32                  int32_t;
+typedef int64                  int64_t;
+typedef uint8                  uint8_t;
+typedef uint16                 uint16_t;
+typedef uint32                 uint32_t;
+typedef uint64                 uint64_t;
+
 // 添加 size_t 类型定义
 #ifndef _SIZE_T_DEFINED
 #define _SIZE_T_DEFINED

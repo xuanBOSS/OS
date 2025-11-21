@@ -1,11 +1,13 @@
 # proc/swtch.S
-/*
-    上下文切换
-    void swtch(context_t *old, context_t *new);
-*/
+# 上下文切换
+# void swtch(context_t *old, context_t *new);
 
 .globl swtch
 swtch:
+        # a0 = &old->context
+        # a1 = &new->context
+        
+        # 保存当前上下文到 old
         sd ra, 0(a0)
         sd sp, 8(a0)
         sd s0, 16(a0)
@@ -21,6 +23,7 @@ swtch:
         sd s10, 96(a0)
         sd s11, 104(a0)
 
+        # 恢复新上下文从 new
         ld ra, 0(a1)
         ld sp, 8(a1)
         ld s0, 16(a1)

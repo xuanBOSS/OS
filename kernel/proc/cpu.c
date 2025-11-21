@@ -26,6 +26,7 @@ cpu_t* mycpu(void)
     if (!cpu_initialized[cpuid]) {
         cpus[cpuid].noff = 0;
         cpus[cpuid].origin = 0;
+        cpus[cpuid].intena = 0;  
         cpus[cpuid].proc = NULL;  // ✅ 使用 NULL 而不是 0
         // 初始化 context
         cpus[cpuid].ctx.ra = 0;
@@ -60,6 +61,7 @@ int mycpuid(void)
 proc_t* myproc(void)
 {
     cpu_t* cpu = mycpu();
+    
     return cpu->proc;
 }
 
@@ -72,6 +74,7 @@ void cpu_init(void)
     for (int i = 0; i < NCPU; i++) {
         cpus[i].noff = 0;
         cpus[i].origin = 0;
+        cpus[i].intena = 0;
         cpus[i].proc = NULL;
         
         // 初始化 context
@@ -117,6 +120,7 @@ void cpu_stats(void)
         printf("CPU %d:\n", i);
         printf("  noff: %d\n", cpus[i].noff);
         printf("  origin: %d\n", cpus[i].origin);
+        printf("  intena: %d\n", cpus[i].intena);
         printf("  proc: %s (PID=%d)\n", 
                cpus[i].proc ? cpus[i].proc->name : "NULL",
                cpus[i].proc ? cpus[i].proc->pid : -1);

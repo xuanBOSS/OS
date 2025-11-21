@@ -89,3 +89,4 @@ smode_loop:
 .global CPU_stack
 CPU_stack:
     .zero 12288       # 12 KB 栈，支持3核，每核4KB
+    

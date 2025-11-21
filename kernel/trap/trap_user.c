@@ -74,18 +74,11 @@ void trap_user_handler()
     uint64 sepc = r_sepc();
     uint64 stval = r_stval();
     
-    // ✅ 添加基本的完整性检查
     if (!p->tf) {
         panic("trap_user_handler: process has no trapframe");
     }
     
-    // ✅ 可选：简化的调试输出
-    #ifdef TRAP_DEBUG
-    printf("User trap: scause=0x%lx, sepc=0x%lx, pid=%d\n", scause, sepc, p->pid);
-    #endif
-    
     if (scause == 8) {  // 系统调用
-        // ✅ 检查系统调用是否来自有效地址
         if (sepc < 0x1000 || sepc > 0x20000) {
             printf("❌ System call from invalid address: 0x%lx\n", sepc);
             handle_user_trap_error(scause, sepc, stval);
@@ -97,8 +90,17 @@ void trap_user_handler()
         w_sepc(sepc);
         p->tf->epc = sepc;
         
-        // ✅ 直接调用系统调用处理器，不输出测试信息
+        // 调用系统调用处理器
         syscall();
+        
+        // ✅ 关键修改：检查进程状态
+        if (p->state == PROC_SLEEPING) {
+            printf("trap_user_handler: process went to sleep, calling scheduler\n");
+            // 进程进入睡眠状态，需要调度其他进程
+            sched();  // 这会切换到调度器
+            // 当进程被唤醒时会回到这里
+            printf("trap_user_handler: process woke up, returning to user\n");
+        }
         
         // 返回用户空间
         trap_user_return();
@@ -107,30 +109,19 @@ void trap_user_handler()
         printf("✅ Program completed with ebreak\n");
         printf("Final return value: %ld\n", p->tf->a0);
         
-        // 可以选择退出或继续
         printf("System halted.\n");
         while(1) {
             asm volatile("wfi");
         }
         
     } else {
-        // ✅ 使用详细的错误处理
         handle_user_trap_error(scause, sepc, stval);
-        
-        // ✅ 尝试恢复或安全退出
-        if (scause == 0xc && sepc == 0) {
-            printf("Attempting to terminate process safely...\n");
-            p->tf->a0 = -1;  // 设置退出码
-            // 可以选择调用 exit 系统调用或直接终止
-            printf("Process terminated due to fatal error\n");
-            while(1) {
-                asm volatile("wfi");
-            }
-        }
-        
         panic("Unexpected user trap");
     } 
 }
+
+#define USER_RETURN_OFFSET ((uint64)user_return - (uint64)trampoline)
+#define USER_RETURN_VA (TRAMPOLINE + USER_RETURN_OFFSET)
 
 void trap_user_return()
 {
@@ -139,33 +130,27 @@ void trap_user_return()
         panic("trap_user_return: no current process");
     }
     
-    // ✅ 添加返回前的完整性检查
-    if (!p->tf) {
-        panic("trap_user_return: no trapframe");
-    }
+    printf("trap_user_return: ENTRY - PID=%d\n", p->pid);
     
-    if (!p->pgtbl) {
-        panic("trap_user_return: no page table");
-    }
+    uint64 user_satp = MAKE_SATP(p->pgtbl);
     
-    // ✅ 检查返回地址是否合理
-    if (p->tf->epc == 0) {
-        printf("❌ Warning: returning to address 0!\n");
-        printf("  This will likely cause an instruction page fault\n");
-        printf("  Trapframe state:\n");
-        printf("    epc: 0x%lx\n", p->tf->epc);
-        printf("    sp: 0x%lx\n", p->tf->sp);
-        printf("    ra: 0x%lx\n", p->tf->ra);
-        panic("Invalid return address");
-    }
+    // ✅ 计算 user_return 在 TRAMPOLINE 空间中的虚拟地址
+    extern char trampoline[];
+    extern char user_return[];
     
-    if (p->tf->epc < 0x1000 || p->tf->epc > 0x20000) {
-        printf("❌ Warning: suspicious return address 0x%lx\n", p->tf->epc);
-    }
+    uint64 user_return_offset = (uint64)user_return - (uint64)trampoline;
+    uint64 user_return_va = TRAMPOLINE + user_return_offset;
     
-    // ✅ 直接返回用户空间，不输出调试信息
-    extern void user_return(uint64 trapframe, uint64 user_satp);
-    user_return((uint64)p->tf, MAKE_SATP(p->pgtbl));
+    printf("trap_user_return: trampoline PA = 0x%lx\n", (uint64)trampoline);
+    printf("trap_user_return: user_return PA = 0x%lx\n", (uint64)user_return);
+    printf("trap_user_return: user_return offset = 0x%lx\n", user_return_offset);
+    printf("trap_user_return: user_return VA = 0x%lx\n", user_return_va);
+    
+    printf("trap_user_return: calling user_return via trampoline\n");
+    
+    // ✅ 通过函数指针调用 user_return 的虚拟地址版本
+    void (*fn)(uint64, uint64) = (void (*)(uint64, uint64))user_return_va;
+    fn(TRAPFRAME, user_satp);
     
     panic("user_return returned - this should never happen");
 }

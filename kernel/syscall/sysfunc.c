@@ -10,6 +10,7 @@
 #include "memlayout.h"
 #include "riscv.h"
 #include "security/security.h"
+#include "trap/trap.h"
 
 // 验证用户指针
 static int validate_user_ptr(uint64 ptr, uint64 len) {
@@ -555,67 +556,209 @@ uint64 sys_getpid(void)
 }
 
 // sys_fork - 创建子进程
-uint64 sys_fork(void)
-{
-    printf("sys_fork: creating child process (simplified)\n");
-    proc_t* p = myproc();
-    printf("sys_fork: parent PID=%d\n", p->pid);
+uint64 sys_fork(void) {
+    proc_t *parent = myproc();
+    proc_t *child;
     
-    // 简化实现：返回一个假的子进程PID
-    printf("sys_fork: would create child process (not fully implemented)\n");
-    return p->pid + 1;  // 返回假的子进程PID
+    printf("sys_fork: parent PID=%d creating child\n", parent->pid);
+    
+    // 分配新进程
+    child = proc_alloc();
+    if (!child) {
+        printf("sys_fork: failed to allocate child process\n");
+        return -1;
+    }
+    
+    printf("sys_fork: allocated child PID=%d\n", child->pid);
+    
+    // ✅ 关键：正确设置父子关系
+    child->parent = parent;
+    printf("sys_fork: set child->parent = %p (PID=%d)\n", parent, parent->pid);
+    
+    // 复制父进程的内存
+    if (proc_copy_memory(parent, child) < 0) {
+        printf("sys_fork: failed to copy memory\n");
+        proc_free(child);
+        return -1;
+    }
+    
+    // 复制父进程的文件描述符
+    proc_copy_files(parent, child);
+    
+    // ✅ 复制trapframe
+    if (!child->tf || !parent->tf) {
+        printf("sys_fork: invalid trapframe\n");
+        proc_free(child);
+        return -1;
+    }
+    
+    // ✅ 先保存子进程的 kernel_sp 和其他内核字段
+    extern pagetable_t kernel_pagetable;
+    uint64 child_kernel_sp = child->kstack + PGSIZE;
+    uint64 child_kernel_satp = MAKE_SATP(kernel_pagetable);
+    uint64 child_kernel_trap = (uint64)trap_user_handler;
+    
+    // 复制父进程的trapframe到子进程
+    *child->tf = *parent->tf;
+    
+    // ✅ 恢复子进程自己的内核字段（关键！）
+    child->tf->kernel_sp = child_kernel_sp;
+    child->tf->kernel_satp = child_kernel_satp;
+    child->tf->kernel_trap = child_kernel_trap;
+    
+    // ✅ 设置子进程的返回值为0
+    child->tf->a0 = 0;
+    
+    // 设置子进程状态为可运行
+    child->state = PROC_RUNNABLE;
+    
+    printf("sys_fork: child PID=%d created successfully\n", child->pid);
+    printf("sys_fork: child->parent = 0x%lx (PID=%d)\n", (uint64)child->parent, child->parent->pid);
+    printf("sys_fork: verification - parent=0x%lx, child->parent=0x%lx\n", 
+           (uint64)parent, (uint64)child->parent);
+    
+    // 父进程返回子进程PID
+    return child->pid;
 }
 
 // sys_exit - 退出进程
-uint64 sys_exit(void)
-{
-    int exit_code;
-    arg_uint32(0, (uint32*)&exit_code);
+uint64 sys_exit(void) {
+    proc_t *p = myproc();
+    int status;
     
-    printf("sys_exit: process exiting with code %d\n", exit_code);
+    if (argint(0, &status) < 0) {
+        return -1;
+    }
     
-    proc_t* p = myproc();
-    printf("sys_exit: terminating process %s (PID=%d)\n", p->name, p->pid);
+    printf("sys_exit: process %s (PID=%d) exiting with status %d\n", 
+           p->name, p->pid, status);
     
+    printf("sys_exit: DEBUG - p = 0x%lx\n", (uint64)p);
+    printf("sys_exit: DEBUG - p->parent = 0x%lx\n", (uint64)p->parent);
+
+    if (p->parent) {
+        printf("sys_exit: DEBUG - parent PID = %d\n", p->parent->pid);
+        printf("sys_exit: DEBUG - parent name = %s\n", p->parent->name);
+    } else {
+        printf("sys_exit: DEBUG - parent is NULL\n");
+    }
+
     // 关闭所有打开的文件
-    printf("sys_exit: closing all open files\n");
     for (int fd = 0; fd < NOFILE; fd++) {
         if (p->ofile[fd]) {
             printf("sys_exit: closing fd %d\n", fd);
             fileclose(p->ofile[fd]);
-            p->ofile[fd] = NULL;
+            p->ofile[fd] = 0;
         }
     }
     
-    // 标记进程为僵尸状态
-    p->state = PROC_ZOMBIE;
-    p->exit_code = exit_code;
-    
-    printf("sys_exit: process terminated\n");
-    
-    // 简化实现：直接停止
-    printf("=== PROCESS EXIT SIMULATION ===\n");
-    while(1) {
-        asm volatile("wfi");
+    // 释放当前目录
+    if (p->cwd) {
+        iput(p->cwd);
+        p->cwd = 0;
     }
     
-    return 0;
+    // 保存退出状态
+    p->exit_code = status;
+    
+    // 将所有子进程重新分配给init进程
+    for (proc_t *child = proc_table; child < &proc_table[MAX_PROC]; child++) {
+        if (child->parent == p) {
+            child->parent = initproc;
+            wakeup(initproc);  // 唤醒init进程收集僵尸进程
+        }
+    }
+    
+    // 唤醒父进程（如果在wait）
+    printf("sys_exit: parent process is %p (PID=%d)\n", 
+           p->parent, p->parent ? p->parent->pid : -1);
+    
+    // 唤醒父进程（如果在wait）
+    printf("sys_exit: waking up parent process\n");
+    wakeup(p->parent);
+    printf("sys_exit: parent wakeup completed\n");  // ✅ 添加这行
+    
+    // 获取进程锁并设置为僵尸状态
+    printf("sys_exit: acquiring process lock\n");  // ✅ 添加这行
+    spinlock_acquire(&p->lock);
+    printf("sys_exit: setting state to ZOMBIE\n");  // ✅ 添加这行
+    p->state = PROC_ZOMBIE;
+    
+    printf("sys_exit: process %s (PID=%d) became zombie\n", p->name, p->pid);
+    
+    // 调度其他进程，永不返回
+    printf("sys_exit: calling sched() to yield CPU\n");  // ✅ 添加这行
+    sched();
+    
+    // ✅ 使用 __builtin_unreachable() 告诉编译器这里永不到达
+    __builtin_unreachable();
 }
 
 // sys_wait - 等待子进程
-uint64 sys_wait(void)
-{
-    uint64 status_addr;
-    arg_uint64(0, &status_addr);
+uint64 sys_wait(void) {
+    proc_t *p = myproc();
+    proc_t *child;
+    int havekids, pid;
+    uint64 addr;
     
-    printf("sys_wait: waiting for child process\n");
+    if (argaddr(0, &addr) < 0) {
+        return -1;
+    }
     
-    proc_t* p = myproc();
-    printf("sys_wait: parent PID=%d\n", p->pid);
+    printf("sys_wait: ENTRY - process %s (PID=%d) waiting for children\n", p->name, p->pid);
     
-    // 简化实现：返回假的子进程PID
-    printf("sys_wait: returning child PID (simulated)\n");
-    return p->pid + 1;
+    spinlock_acquire(&wait_lock);
+    
+    for (;;) {
+        printf("sys_wait: LOOP START - scanning for children\n");
+        
+        havekids = 0;
+        for (child = proc_table; child < &proc_table[MAX_PROC]; child++) {
+            if (child->parent == p) {
+                spinlock_acquire(&child->lock);
+                
+                havekids = 1;
+                if (child->state == PROC_ZOMBIE) {
+                    // 找到僵尸子进程
+                    pid = child->pid;
+                    int exit_code = child->exit_code;  // ✅ 先保存退出码
+                    
+                    printf("sys_wait: found zombie child PID=%d, exit_status=%d\n", 
+                           pid, exit_code);
+                    
+                    // ✅ 复制退出状态到用户空间
+                    if (addr != 0 && copyout(p->pgtbl, addr, 
+                                            (char*)&exit_code, sizeof(int)) < 0) {
+                        spinlock_release(&child->lock);
+                        spinlock_release(&wait_lock);
+                        return -1;
+                    }
+                    
+                    // ✅ 使用 proc_free() 来清理子进程
+                    // proc_free() 会自动释放内存、文件描述符等
+                    spinlock_release(&child->lock);  // 先释放锁
+                    proc_free(child);  // 然后清理
+                    
+                    spinlock_release(&wait_lock);
+                    
+                    printf("sys_wait: SUCCESS - returning child PID=%d\n", pid);
+                    return pid;
+                }
+                spinlock_release(&child->lock);
+            }
+        }
+        
+        if (!havekids || p->killed) {
+            printf("sys_wait: NO CHILDREN - returning -1\n");
+            spinlock_release(&wait_lock);
+            return -1;
+        }
+        
+        printf("sys_wait: SLEEPING - waiting for child to exit (channel=0x%lx)\n", (uint64)p);
+        sleep(p, &wait_lock);
+        
+        printf("sys_wait: WOKE UP - continuing\n");
+    }
 }
 
 // sys_kill - 发送信号
@@ -746,4 +889,88 @@ uint64 sys_sbrk(void)
     
     printf("sys_sbrk: returning old heap top: 0x%lx\n", old_heap);
     return old_heap;
+}
+
+// 系统调用实现
+uint64 sys_yield(void) {
+    proc_t *p = myproc();
+    spinlock_acquire(&p->lock);
+    p->state = PROC_RUNNABLE;
+    sched();
+    spinlock_release(&p->lock);
+    return 0;
+}
+
+// sys_pipe - 创建管道
+uint64 sys_pipe(void) {
+    uint64 fdarray;  // 用户空间的 int[2] 数组地址
+    struct file *rf, *wf;
+    int fd0, fd1;
+    proc_t *p = myproc();
+    
+    printf("sys_pipe: creating pipe\n");
+    
+    // 获取参数：用户空间数组地址
+    if (argaddr(0, &fdarray) < 0) {
+        printf("sys_pipe: failed to get argument\n");
+        return -1;
+    }
+    
+    printf("sys_pipe: user array address = 0x%lx\n", fdarray);
+    
+    // 分配管道
+    if (pipealloc(&rf, &wf) < 0) {
+        printf("sys_pipe: pipealloc failed\n");
+        return -1;
+    }
+    
+    // 分配文件描述符 0（读端）
+    fd0 = -1;
+    for (int i = 0; i < NOFILE; i++) {
+        if (p->ofile[i] == NULL) {
+            fd0 = i;
+            p->ofile[fd0] = rf;
+            break;
+        }
+    }
+    
+    if (fd0 < 0) {
+        printf("sys_pipe: no available fd for read end\n");
+        goto bad;
+    }
+    
+    // 分配文件描述符 1（写端）
+    fd1 = -1;
+    for (int i = 0; i < NOFILE; i++) {
+        if (p->ofile[i] == NULL) {
+            fd1 = i;
+            p->ofile[fd1] = wf;
+            break;
+        }
+    }
+    
+    if (fd1 < 0) {
+        printf("sys_pipe: no available fd for write end\n");
+        goto bad;
+    }
+    
+    printf("sys_pipe: allocated fd0=%d (read), fd1=%d (write)\n", fd0, fd1);
+    
+    // 将 fd0 写到 fdarray[0]
+    uvm_copyout(p->pgtbl, fdarray, (uint64)&fd0, sizeof(fd0));
+    
+    // 将 fd1 写到 fdarray[1]
+    uvm_copyout(p->pgtbl, fdarray + sizeof(int), (uint64)&fd1, sizeof(fd1));
+    
+    printf("sys_pipe: success, returned fd[0]=%d, fd[1]=%d\n", fd0, fd1);
+    return 0;
+
+bad:
+    if (fd0 >= 0)
+        p->ofile[fd0] = NULL;
+    if (fd1 >= 0)
+        p->ofile[fd1] = NULL;
+    fileclose(rf);
+    fileclose(wf);
+    return -1;
 }

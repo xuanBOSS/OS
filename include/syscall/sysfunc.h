@@ -16,6 +16,7 @@ uint64 sys_exit(void);
 uint64 sys_wait(void);
 uint64 sys_kill(void);
 uint64 sys_getpid(void);
+uint64 sys_yield(void);
 
 // 文件操作类
 uint64 sys_open(void);
@@ -25,5 +26,7 @@ uint64 sys_write(void);
 
 // 内存管理类
 uint64 sys_sbrk(void);
+
+uint64 sys_pipe(void);
 
 #endif

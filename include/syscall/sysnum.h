@@ -23,15 +23,17 @@
 #define SYS_wait         18
 #define SYS_kill         19
 #define SYS_getpid       20
-#define SYS_getppid      21  
+#define SYS_yield        21  
+#define SYS_pipe         22  
+#define SYS_getppid      28  
 
 // 文件操作类
-#define SYS_open         22  
-#define SYS_close        23
-#define SYS_read         24
-#define SYS_write        25
+#define SYS_open         23  
+#define SYS_close        24
+#define SYS_read         25
+#define SYS_write        26
 
 // 内存管理类
-#define SYS_sbrk         26  
+#define SYS_sbrk         27  
 
 #endif

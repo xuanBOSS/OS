@@ -1,4 +1,5 @@
 #include "proc/cpu.h"
+#include "proc/proc.h"
 #include "mem/str.h"
 #include "lib/print.h"
 #include "syscall/syscall_error.h"

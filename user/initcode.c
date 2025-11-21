@@ -2,9 +2,21 @@
 #include "sys.h"
 
 void _start(void) {
-    // 最简单的死循环，不调用任何系统调用
-    while(1) {
-        // 纯粹的死循环
-        for (volatile int i = 0; i < 1000; i++);
+    // 测试基本的 fork + exit + wait
+    
+    // 测试 fork
+    int pid = fork();
+    
+    if (pid == 0) {
+        // 子进程
+        exit(42);  // 子进程退出，退出码为42
+    } else if (pid > 0) {
+        // 父进程
+        int status;
+        wait(&status);  // 等待子进程退出
+        exit(0);        // 父进程正常退出
+    } else {
+        // fork 失败
+        exit(-1);
     }
 }

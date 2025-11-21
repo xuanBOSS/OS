@@ -21,19 +21,32 @@ extern int errno;
 #define STDOUT_FILENO 1
 #define STDERR_FILENO 2
 
-//系统调用声明（基于 include/syscall/sysnum.h）
+// ================================
+// 系统调用声明
+// ================================
+
+// 进程控制类
 int fork(void);
 int exit(int) __attribute__((noreturn));
 int wait(int*);
 int kill(int, int);
 int getpid(void);
+int getppid(void);
+void yield(void);          
+
+// 文件操作类
+int pipe(int*);          
 int open(const char*, int);
 int close(int);
 int read(int, void*, int);
 int write(int, const void*, int);
+
+// 内存管理类
 char* sbrk(int);
 
-//用户库函数声明
+// ================================
+// 用户库函数声明
+// ================================
 char* strcpy(char*, const char*);
 void* memmove(void*, const void*, int);
 char* strchr(const char*, char c);
@@ -45,25 +58,19 @@ int atoi(const char*);
 int memcmp(const void*, const void*, uint32);
 void* memcpy(void*, const void*, uint32);
 
-//格式化输出函数
+// 格式化输出函数
 void vprintf(int fd, const char *fmt, va_list ap);
 void fprintf(int, const char*, ...) __attribute__ ((format (printf, 2, 3)));
 void printf(const char*, ...) __attribute__ ((format (printf, 1, 2)));
 int puts(const char*);
 int putchar(int);
 
-//内存分配函数
+// 内存分配函数
 void* malloc(uint32);
 void free(void*);
 
-//文件系统相关
+// 文件系统相关
 int stat(const char*, struct stat*);
 int fstat(int fd, struct stat*);
-
-// 进程控制
-int getpid(void);
-int getppid(void);
-int fork(void);
-int wait(int *status);
 
 #endif

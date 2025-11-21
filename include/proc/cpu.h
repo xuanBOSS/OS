@@ -20,6 +20,7 @@ extern volatile int secondary_cpus_ready;
 typedef struct cpu {
     int noff;       // 关中断的深度
     int origin;     // 第一次关中断前的状态
+    int intena;     // 中断使能状态
     proc_t* proc;   // cpu上运行的进程 (老师的版本)
     context_t ctx;  // 内核上下文暂存 (老师的版本)
 } cpu_t;

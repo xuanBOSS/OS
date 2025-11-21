@@ -28,13 +28,11 @@ extern struct scheduler_statistics scheduler_stats;
 // 调度器接口函数
 void scheduler_init(void);
 void scheduler_inithart(void);
-void yield(void);
 void schedule(void);
 int should_reschedule(void);
 void trigger_reschedule(void);
 void update_process_timeslice(void);
 void print_scheduler_stats(void);  // 添加这个声明
-void scheduler_test(void);     
 
 // 调度原子性保护
 void scheduler_lock_acquire(void);
