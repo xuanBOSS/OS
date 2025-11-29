@@ -13,14 +13,15 @@
 #define SYSCALL_EMFILE     -8   // 打开文件过多
 #define SYSCALL_EISDIR     -9   // 是目录
 #define SYSCALL_ENXIO     -10   // 设备不存在
-#define SYSCALL_ENFILE    -11   // ✅ 添加：系统文件表满
-#define SYSCALL_EBADF     -12   // ✅ 添加：错误的文件描述符
-#define SYSCALL_EACCES    -13   // ✅ 添加：权限拒绝
-#define SYSCALL_EEXIST    -14   // ✅ 添加：文件已存在
-#define SYSCALL_ENOTDIR   -15   // ✅ 添加：不是目录
-#define SYSCALL_EAGAIN    -16   // ✅ 添加：资源暂时不可用
-#define SYSCALL_ENOSPC    -17   // ✅ 添加：设备空间不足
-#define SYSCALL_EROFS     -18   // ✅ 添加：只读文件系统
+#define SYSCALL_ENFILE    -11   // 系统文件表满
+#define SYSCALL_EBADF     -12   // 错误的文件描述符
+#define SYSCALL_EACCES    -13   // 权限拒绝
+#define SYSCALL_EEXIST    -14   // 文件已存在
+#define SYSCALL_ENOTDIR   -15   // 不是目录
+#define SYSCALL_EAGAIN    -16   // 资源暂时不可用
+#define SYSCALL_ENOSPC    -17   // 设备空间不足
+#define SYSCALL_EROFS     -18   // 只读文件系统
+#define SYSCALL_EIO       -19   // I/O 错误
 
 // 错误处理策略
 typedef enum {

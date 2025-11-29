@@ -107,21 +107,3 @@ int atoi(const char *s) {
         n = n * 10 + *s++ - '0';
     return n;
 }
-
-//文件系统函数
-int stat(const char *n, struct stat *st) {
-    int fd;
-    int r;
-    
-    fd = open(n, O_RDONLY);
-    if (fd < 0)
-        return -1;
-    r = fstat(fd, st);
-    close(fd);
-    return r;
-}
-
-int fstat(int fd, struct stat *st) {
-    // 这里需要实现 fstat 系统调用，暂时返回错误
-    return -1;
-}

@@ -17,27 +17,29 @@ static uint64 mscratch[NCPU][5];
 // 时钟初始化（M模式）
 void timer_init()
 {
-    int hartid = mycpuid();
-    
-    // 设置mscratch区域
-    // mscratch[hartid][0-2]: 保存a1,a2,a3寄存器
-    // mscratch[hartid][3]: CLINT_MTIMECMP地址
-    // mscratch[hartid][4]: 时间间隔INTERVAL
-    mscratch[hartid][3] = CLINT_MTIMECMP(hartid);
-    mscratch[hartid][4] = INTERVAL;
-    
-    // 设置mscratch寄存器指向当前CPU的存储区域
-    w_mscratch((uint64)&mscratch[hartid]);
-    
-    // 设置M模式中断向量
-    w_mtvec((uint64)timer_vector);
-    
-    // 设置第一次定时器中断
+    // 获取当前cpuid
+    int hartid = r_tp();
+
+    // 一开始设置 cmp_time = cur_time + time interval
+    // 之后每触发一次时钟中断 有 cmp_time += time interval
     *(uint64*)CLINT_MTIMECMP(hartid) = *(uint64*)CLINT_MTIME + INTERVAL;
-    
-    // 使能M模式定时器中断
+
+    // 指向当前CPU的mscratch, 与trap.S里的timer_vector密切配合
+    uint64* scratch = mscratch[hartid];
+    scratch[3] = CLINT_MTIMECMP(hartid);
+    scratch[4] = INTERVAL;
+    w_mscratch((uint64)scratch);
+
+    // 设置M-mode时钟中断处理函数
+    w_mtvec((uint64)timer_vector);
+
+    // M-mode中断使能(总开关)
+    w_mstatus(r_mstatus() | MSTATUS_MIE);
+
+    // M-mode中断使能(时钟中断开关)
     w_mie(r_mie() | MIE_MTIE);
 }
+
 
 /*--------------------- S模式系统时钟 --------------------*/
 
@@ -56,6 +58,7 @@ void timer_update()
 {
     spinlock_acquire(&sys_timer.lk);
     sys_timer.ticks++;
+    wakeup(&sys_timer.ticks);
     spinlock_release(&sys_timer.lk);
 }
 

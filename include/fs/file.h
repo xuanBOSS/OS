@@ -4,51 +4,57 @@
 #include "common.h"
 #include "lib/lock.h"
 
-// ================================
-// 文件系统常量定义
-// ================================
+#define NFILE 100
+#define NDEV 10
+#define NOFILE 16
 
-// 最大文件数和文件描述符数
-#define NFILE       100     // 系统最大文件数
-#define NOFILE      16      // 每个进程最大文件描述符数
-#define MAXPATH     128     // 最大路径长度
-#define DIRSIZ      14      // 目录名最大长度
-
-// 设备号
-#define NDEV        10      // 最大设备数
-#define CONSOLE     1       // 控制台设备号
-
-// 文件类型
-#define FD_NONE     0
-#define FD_PIPE     1
-#define FD_INODE    2
+// file->type 选项
+#define FD_UNUSED   0
+#define FD_DIR      1
+#define FD_FILE     2
 #define FD_DEVICE   3
+#define FD_PIPE     4
 
-// 文件打开标志
-#define O_RDONLY    0x000
-#define O_WRONLY    0x001
-#define O_RDWR      0x002
-#define O_CREATE    0x200
-#define O_TRUNC     0x400
+// 文件打开方式 (readable writable)
+#define MODE_CREATE    0x1 // 文件不存在则创建
+#define MODE_READ      0x2 // 读文件
+#define MODE_WRITE     0x4 // 写文件
 
-// inode 文件类型
-#define T_DIR     1   // 目录
-#define T_FILE    2   // 文件
-#define T_DEVICE  3   // 设备
+typedef struct inode inode_t;
 
-// ================================
-// 数据结构定义
-// ================================
+typedef struct file {
+    uint16 type;      // 文件类型
+    bool readable;    // 可读?
+    bool writable;    // 可写?
+    uint32 ref;       // 引用数
+    uint16 major;     // 主设备号 (for device)
+    uint32 offset;    // 偏移量   (for file)
+    inode_t* ip;      // 对应的inode (for dir file device)
+    
+    struct pipe* pipe; // for pipe
+} file_t;
 
-// 睡眠锁结构（简化版）
-struct sleeplock {
-    spinlock_t lk;      // 保护睡眠锁的自旋锁
-    int locked;         // 是否被锁定
-    char *name;         // 锁的名称
-    int pid;            // 持有锁的进程ID
-};
+typedef struct file_state {
+    uint16 type;
+    uint16 inode_num;
+    uint16 nlink;
+    uint32 size;
+    uint32 atime;     // ← 新增：访问时间
+    uint32 mtime;     // ← 新增：修改时间
+    uint32 ctime;     // ← 新增：创建时间
+} file_state_t;
 
-// 管道结构（简化版）
+#define N_DEV 10    // 设备类型数
+
+#define DEV_CONSOLE 1    // 控制台的主设备号
+
+// 设备文件需要提供读写接口
+typedef struct dev {
+    uint32 (*read)(uint32 len, uint64 dst, bool user_dst);
+    uint32 (*write)(uint32 len, uint64 src, bool user_src);
+} dev_t;
+
+// 管道结构
 struct pipe {
     spinlock_t lock;
     char data[512];
@@ -58,93 +64,22 @@ struct pipe {
     int writeopen;      // 写端是否打开
 };
 
-// 文件结构
-struct file {
-    enum { FD_NONE_E, FD_PIPE_E, FD_INODE_E, FD_DEVICE_E } type;
-    int ref;            // 引用计数
-    char readable;      // 可读
-    char writable;      // 可写
-    struct pipe *pipe;  // FD_PIPE
-    struct inode *ip;   // FD_INODE 和 FD_DEVICE
-    uint32 off;         // FD_INODE
-    int16 major;        // FD_DEVICE
-};
+// 文件操作
+void    file_init(void);
+file_t* file_alloc(void);
+file_t* file_create_dev(char* path, uint16 major, uint16 minor);
+file_t* file_open(char* path, uint32 open_mode);
+void    file_close(file_t* file);
+uint32  file_read(file_t* file, uint32 len, uint64 dst, bool user);
+uint32  file_write(file_t* file, uint32 len, uint64 src, bool user);
+uint32  file_lseek(file_t* file, uint32 offset, int flags);
+file_t* file_dup(file_t* file);
+int     file_stat(file_t* file, uint64 addr);
 
-// inode 结构（简化版）
-struct inode {
-    uint32 dev;         // 设备号
-    uint32 inum;        // inode 号
-    int ref;            // 引用计数
-    struct sleeplock lock;
-    int valid;          // inode 是否已从磁盘读取
-
-    int16 type;         // 文件类型
-    int16 major;        // 主设备号 (T_DEVICE only)
-    int16 minor;        // 次设备号 (T_DEVICE only)
-    int16 nlink;        // 链接数
-    uint32 size;        // 文件大小（字节）
-    uint32 addrs[13];   // 数据块地址
-};
-
-// 目录项
-struct dirent {
-    uint16 inum;
-    char name[DIRSIZ];
-};
-
-// ================================
-// 全局变量声明
-// ================================
-
-// 全局文件表
-extern struct file ftable[NFILE];
-extern spinlock_t ftable_lock;
-
-// ================================
-// 函数声明
-// ================================
-
-// 文件操作函数
-struct file* filealloc(void);
-void fileclose(struct file*);
-struct file* filedup(struct file*);
-void fileinit(void);
-int fileread(struct file*, uint64, int n);
-int filestat(struct file*, uint64 addr);
-int filewrite(struct file*, uint64, int n);
-
-// inode 相关函数
-struct inode* ialloc(uint32, int16);
-struct inode* idup(struct inode*);
-void iinit(void);
-void ilock(struct inode*);
-void iput(struct inode*);
-void iunlock(struct inode*);
-void iunlockput(struct inode*);
-void iupdate(struct inode*);
-int namecmp(const char*, const char*);
-struct inode* namei(char*);
-struct inode* nameiparent(char*, char*);
-int readi(struct inode*, int, uint64, uint32, uint32);
-int writei(struct inode*, int, uint64, uint32, uint32);
-void itrunc(struct inode*);
-
-// 设备驱动函数
-int console_read(int, uint64, int);
-int console_write(int, uint64, int);
-
-// 睡眠锁函数
-void initsleeplock(struct sleeplock*, char*);
-void acquiresleeplock(struct sleeplock*);
-void releasesleeplock(struct sleeplock*);
-int holdingsleeplock(struct sleeplock*);
-
-// ================================
-// 管道函数声明
-// ================================
-int pipealloc(struct file **f0, struct file **f1);
+// 管道操作
+int  pipealloc(file_t **f0, file_t **f1);
 void pipeclose(struct pipe *pi, int writable);
-int pipewrite(struct pipe *pi, uint64 addr, int n);
-int piperead(struct pipe *pi, uint64 addr, int n);
+int  pipewrite(struct pipe *pi, uint64 addr, int n);
+int  piperead(struct pipe *pi, uint64 addr, int n);
 
 #endif

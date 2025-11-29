@@ -65,6 +65,10 @@ void handle_user_trap_error(uint64 scause, uint64 sepc, uint64 stval) {
 
 void trap_user_handler()
 {
+    // ✅ 第一件事：切换到内核中断向量
+    extern void kernel_vector();
+    w_stvec((uint64)kernel_vector);
+    
     proc_t* p = myproc();
     if (!p) {
         panic("trap_user_handler: no current process");
@@ -78,6 +82,40 @@ void trap_user_handler()
         panic("trap_user_handler: process has no trapframe");
     }
     
+    // ✅ 判断是中断还是异常
+    if (scause & (1UL << 63)) {
+        // 中断处理
+        int irq = scause & 0xff;
+        
+        if (irq == 5) {
+            // S-mode timer interrupt
+            timer_interrupt_handler();
+            // 中断返回时不需要修改EPC，直接返回用户空间
+            trap_user_return();
+            return;
+        } else if (irq == 9) {
+            // S-mode external interrupt (磁盘I/O完成等)
+            printf("trap_user_handler: external interrupt (irq=9), calling external_interrupt_handler\n");
+            external_interrupt_handler();
+            printf("trap_user_handler: external_interrupt_handler returned\n");
+            // 中断返回时不需要修改EPC，直接返回用户空间
+            trap_user_return();
+            return;
+        } else if (irq == 1) {
+            // S-mode software interrupt
+            w_sip(r_sip() & ~SIP_SSIP);
+            timer_interrupt_handler();
+            trap_user_return();
+            return;
+        } else {
+            printf("trap_user_handler: Unknown interrupt %d (scause=0x%lx)\n", irq, scause);
+            // 对于未知中断，也尝试返回用户空间
+            trap_user_return();
+            return;
+        }
+    }
+    
+    // 异常处理
     if (scause == 8) {  // 系统调用
         if (sepc < 0x1000 || sepc > 0x20000) {
             printf("❌ System call from invalid address: 0x%lx\n", sepc);
@@ -93,19 +131,14 @@ void trap_user_handler()
         // 调用系统调用处理器
         syscall();
         
-        // ✅ 关键修改：检查进程状态
-        if (p->state == PROC_SLEEPING) {
-            printf("trap_user_handler: process went to sleep, calling scheduler\n");
-            // 进程进入睡眠状态，需要调度其他进程
-            sched();  // 这会切换到调度器
-            // 当进程被唤醒时会回到这里
-            printf("trap_user_handler: process woke up, returning to user\n");
-        }
+        // ✅ 注意：如果系统调用导致进程 sleep，控制流会通过 sleep()->sched() 切换到调度器
+        // 只有当进程被唤醒并重新调度时，才会继续执行
+        // 因此这里不需要检查 PROC_SLEEPING 状态
         
-        // 返回用户空间
+        // ✅ 返回用户空间前恢复用户向量
         trap_user_return();
         
-    } else if (scause == 3) {  // 断点异常 (ebreak)
+    } else if (scause == 3) {  // 断点异常
         printf("✅ Program completed with ebreak\n");
         printf("Final return value: %ld\n", p->tf->a0);
         
@@ -115,8 +148,70 @@ void trap_user_handler()
         }
         
     } else {
+        // 打印详细的 trap 信息
+        printf("trap_user_handler: unhandled trap type: scause=0x%lx\n", scause);
         handle_user_trap_error(scause, sepc, stval);
-        panic("Unexpected user trap");
+        
+        // 对于某些可恢复的异常，尝试跳过指令继续执行
+        uint64 trap_id = scause & 0xf;
+        if (trap_id == 0xc || trap_id == 0xd || trap_id == 0xf) {
+            // 页错误 - 检查地址是否在有效范围内
+            if (sepc < 0x1000 || sepc > 0x20000) {
+                // 无效地址 - 进程可能已损坏，终止它
+                printf("trap_user_handler: invalid page fault address 0x%lx, terminating process\n", sepc);
+                printf("  Process trapframe state: epc=0x%lx, sp=0x%lx, ra=0x%lx\n", 
+                       p->tf->epc, p->tf->sp, p->tf->ra);
+                
+                // 标记进程为已杀死，设置退出码并让进程退出
+                p->killed = 1;
+                p->exit_code = -1;
+                
+                // 设置进程状态为 ZOMBIE，这样父进程可以收集它
+                spinlock_acquire(&p->lock);
+                p->state = PROC_ZOMBIE;
+                spinlock_release(&p->lock);
+                
+                // 唤醒父进程（如果有）
+                if (p->parent) {
+                    wakeup(p->parent);
+                }
+                
+                // 切换到调度器，永不返回
+                sched();
+                panic("sched returned");
+            } else {
+                // 页错误 - 这不应该发生，但我们可以尝试跳过
+                printf("trap_user_handler: page fault at valid address 0x%lx, skipping instruction\n", sepc);
+                p->tf->epc = sepc + 4;
+                trap_user_return();
+                return;
+            }
+        } else if (trap_id == 0x2) {
+            // 非法指令 - 检查地址
+            if (sepc < 0x1000 || sepc > 0x20000) {
+                printf("trap_user_handler: illegal instruction at invalid address 0x%lx, terminating process\n", sepc);
+                p->killed = 1;
+                p->exit_code = -1;
+                
+                spinlock_acquire(&p->lock);
+                p->state = PROC_ZOMBIE;
+                spinlock_release(&p->lock);
+                
+                if (p->parent) {
+                    wakeup(p->parent);
+                }
+                
+                sched();
+                panic("sched returned");
+            } else {
+                printf("trap_user_handler: illegal instruction, skipping\n");
+                p->tf->epc = sepc + 4;
+                trap_user_return();
+                return;
+            }
+        } else {
+            panic("Unexpected user trap");
+        }
     } 
 }
 
@@ -130,25 +225,23 @@ void trap_user_return()
         panic("trap_user_return: no current process");
     }
     
-    printf("trap_user_return: ENTRY - PID=%d\n", p->pid);
-    
-    uint64 user_satp = MAKE_SATP(p->pgtbl);
-    
-    // ✅ 计算 user_return 在 TRAMPOLINE 空间中的虚拟地址
+    // 计算 user_return 在 TRAMPOLINE 空间中的虚拟地址
     extern char trampoline[];
     extern char user_return[];
+    
+    uint64 user_vector_offset = (uint64)user_vector - (uint64)trampoline;
+    uint64 user_trap_addr = TRAMPOLINE + user_vector_offset;
+    
+    w_stvec(user_trap_addr);
+    
+    // ✅ 设置 sscratch
+    w_sscratch(TRAPFRAME);
+    
+    uint64 user_satp = MAKE_SATP(p->pgtbl);
     
     uint64 user_return_offset = (uint64)user_return - (uint64)trampoline;
     uint64 user_return_va = TRAMPOLINE + user_return_offset;
     
-    printf("trap_user_return: trampoline PA = 0x%lx\n", (uint64)trampoline);
-    printf("trap_user_return: user_return PA = 0x%lx\n", (uint64)user_return);
-    printf("trap_user_return: user_return offset = 0x%lx\n", user_return_offset);
-    printf("trap_user_return: user_return VA = 0x%lx\n", user_return_va);
-    
-    printf("trap_user_return: calling user_return via trampoline\n");
-    
-    // ✅ 通过函数指针调用 user_return 的虚拟地址版本
     void (*fn)(uint64, uint64) = (void (*)(uint64, uint64))user_return_va;
     fn(TRAPFRAME, user_satp);
     

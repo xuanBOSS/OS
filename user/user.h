@@ -41,6 +41,28 @@ int close(int);
 int read(int, void*, int);
 int write(int, const void*, int);
 
+// 扩展的文件操作
+int lseek(int fd, int offset, int whence);
+int dup(int oldfd);
+int dup2(int oldfd, int newfd);
+
+// 文件信息
+int stat(const char*, struct stat*);
+int fstat(int fd, struct stat*);
+
+// 目录操作
+int mkdir(const char* path, int mode);
+int chdir(const char* path);
+char* getcwd(char* buf, int size);
+
+// 链接操作
+int link(const char* oldpath, const char* newpath);
+int unlink(const char* path);
+
+// 符号链接
+int symlink(const char* target, const char* linkpath);
+int readlink(const char* path, char* buf, int size);
+
 // 内存管理类
 char* sbrk(int);
 

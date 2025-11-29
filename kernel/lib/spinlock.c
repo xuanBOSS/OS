@@ -26,8 +26,10 @@ void pop_off(void)
         panic("pop_off");
     
     c->noff -= 1;
-    if(c->noff == 0 && c->origin)
+    
+    if(c->noff == 0 && c->origin) {
         intr_on();
+    }
 }
 
 // 是否持有自旋锁
@@ -78,3 +80,40 @@ void spinlock_release(spinlock_t *lk)
     pop_off(); // 开中断
 }
 
+// 睡眠锁实现
+void sleeplock_init(sleeplock_t *lk, char *name)
+{
+    spinlock_init(&lk->lk, "sleep lock");
+    lk->name = name;
+    lk->locked = 0;
+    lk->pid = 0;
+}
+
+void sleeplock_acquire(sleeplock_t *lk)
+{
+    spinlock_acquire(&lk->lk);
+    while (lk->locked) {
+        sleep(lk, &lk->lk);
+    }
+    lk->locked = 1;
+    lk->pid = myproc() ? myproc()->pid : 0;
+    spinlock_release(&lk->lk);
+}
+
+void sleeplock_release(sleeplock_t *lk)
+{
+    spinlock_acquire(&lk->lk);
+    lk->locked = 0;
+    lk->pid = 0;
+    wakeup(lk);
+    spinlock_release(&lk->lk);
+}
+
+int sleeplock_holding(sleeplock_t *lk)
+{
+    int r;
+    spinlock_acquire(&lk->lk);
+    r = lk->locked && (lk->pid == (myproc() ? myproc()->pid : 0));
+    spinlock_release(&lk->lk);
+    return r;
+}

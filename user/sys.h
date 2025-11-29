@@ -29,23 +29,58 @@ typedef long syscall_arg_t;
 
 typedef int pid_t;
 
-// 进程控制
+// ================================
+// 进程控制类
+// ================================
 extern int fork(void);
-extern int exit(int) __attribute__((noreturn));  // ✅ 改为 int
+extern int exit(int) __attribute__((noreturn));
 extern int wait(int* status);
 extern int getpid(void);
 extern int getppid(void);
-extern void yield(void);                         // ✅ 改为 void
+extern void yield(void);
 
-// 文件操作
-extern int pipe(int*);                           // ✅ 新增
+// ================================
+// 文件操作类
+// ================================
+extern int pipe(int*);
 extern int open(const char*, int);
 extern int close(int);
 extern int read(int fd, void* buf, int count);
 extern int write(int fd, const void* buf, int count);
 
-// 内存管理
-extern char* sbrk(int increment);                // ✅ 改为 char*
+// ✅ 新增：扩展的文件操作
+extern int lseek(int fd, int offset, int whence);
+extern int dup(int oldfd);
+extern int dup2(int oldfd, int newfd);
 
+// ================================
+// 文件信息类
+// ================================
+struct stat;  // 前向声明
+
+extern int stat(const char* path, struct stat* statbuf);
+extern int fstat(int fd, struct stat* statbuf);
+
+// ================================
+// 目录操作类
+// ================================
+extern int mkdir(const char* path, int mode);
+extern int chdir(const char* path);
+extern char* getcwd(char* buf, int size);
+
+// ================================
+// 链接操作类
+// ================================
+extern int link(const char* oldpath, const char* newpath);
+extern int unlink(const char* path);
+
+// ✅ 可选：符号链接
+extern int symlink(const char* target, const char* linkpath);
+extern int readlink(const char* path, char* buf, int size);
+
+// ================================
+// 内存管理类
+// ================================
+extern char* sbrk(int increment);
 
 #endif // __SYSCALL_H__

@@ -51,7 +51,15 @@ void kvm_init(void)
     
     // 设备映射
     kvm_map(UART_BASE, UART_BASE, PGSIZE, PTE_R | PTE_W);
-    kvm_map(PLIC_BASE, PLIC_BASE, 0x100000, PTE_R | PTE_W);
+    kvm_map(VIRTIO_BASE, VIRTIO_BASE, PGSIZE, PTE_R | PTE_W);
+    kvm_map(PLIC_BASE, PLIC_BASE, 0x400000, PTE_R | PTE_W);  // PLIC 需要更大的映射空间
+    kvm_map(CLINT_BASE, CLINT_BASE, 0x10000, PTE_R | PTE_W);
+
+    printf("Device mappings created:\n");
+    printf("  UART:   0x%lx\n", UART_BASE);
+    printf("  VIRTIO: 0x%lx\n", VIRTIO_BASE);
+    printf("  PLIC:   0x%lx\n", PLIC_BASE);
+    printf("  CLINT:  0x%lx\n", CLINT_BASE);
     
     // ✅ 关键修复：映射整个物理内存范围，确保内核可以访问所有页面
     uint64 phys_start = KERNBASE;     // 0x80000000

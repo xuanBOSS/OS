@@ -2,6 +2,9 @@
 
 #include "memlayout.h"
 #include "lib/lock.h"
+#include "proc/proc.h"
+#include "mem/vmem.h"
+#include "fs/file.h"
 
 // the UART control registers.
 // some have different meanings for
@@ -90,4 +93,59 @@ void uart_intr(void)
     if(c == -1) break;
     uart_putc_sync(c);
   }
+}
+
+// 控制台设备读取函数
+// 从控制台读取字符到用户空间
+uint32 console_read(uint32 len, uint64 dst, bool user)
+{
+    proc_t* p = myproc();
+    if (!p || !p->pgtbl) {
+        return 0;
+    }
+    
+    char c;
+    uint32 i;
+    for (i = 0; i < len; i++) {
+        int ch = uart_getc_sync();
+        if (ch == -1) {
+            break;  // 没有数据可读
+        }
+        c = (char)ch;
+        
+        // 将字符复制到用户空间
+        if (user) {
+            uvm_copyout(p->pgtbl, dst + i, (uint64)&c, 1);
+        } else {
+            ((char*)dst)[i] = c;
+        }
+    }
+    
+    return i;
+}
+
+// 控制台设备写入函数
+// 从用户空间读取字符并输出到控制台
+uint32 console_write(uint32 len, uint64 src, bool user)
+{
+    proc_t* p = myproc();
+    if (!p || !p->pgtbl) {
+        return 0;
+    }
+    
+    char c;
+    uint32 i;
+    for (i = 0; i < len; i++) {
+        // 从用户空间读取字符
+        if (user) {
+            uvm_copyin(p->pgtbl, (uint64)&c, src + i, 1);
+        } else {
+            c = ((char*)src)[i];
+        }
+        
+        // 输出到控制台
+        uart_putc_sync(c);
+    }
+    
+    return i;
 }

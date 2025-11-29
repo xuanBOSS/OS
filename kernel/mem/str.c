@@ -21,6 +21,28 @@ void* memcpy(void* dst,const void* src,uint64 n)
     return dst;
 }
 
+void* memmove(void* dst, const void* src, uint64 n)
+{
+    char* cdst = (char*)dst;
+    const char* csrc = (const char*)src;
+    
+    // 检查内存区域是否重叠
+    if (cdst < csrc) {
+        // 目标在源之前，从前往后复制
+        for (uint64 i = 0; i < n; i++) {
+            cdst[i] = csrc[i];
+        }
+    } else if (cdst > csrc) {
+        // 目标在源之后，从后往前复制（避免覆盖）
+        for (uint64 i = n; i > 0; i--) {
+            cdst[i - 1] = csrc[i - 1];
+        }
+    }
+    // 如果 dst == src，不需要复制
+    
+    return dst;
+}
+
 int memcmp(const void* s1,const void* s2,uint64 n)
 {
     const char* c1=(const char*)s1;
@@ -134,4 +156,41 @@ char* safestrcpy(char* dst, const char* src, int n) {
         ;
     *dst = 0;
     return os;
+}
+
+char* strncat(char* dst, const char* src, uint64 n)
+{
+    char* original_dst = dst;
+    
+    // 找到dst的末尾
+    while (*dst != '\0') {
+        dst++;
+    }
+    
+    // 拼接最多n个字符
+    uint64 i;
+    for (i = 0; i < n && src[i] != '\0'; i++) {
+        dst[i] = src[i];
+    }
+    
+    // 添加终止符
+    dst[i] = '\0';
+    
+    return original_dst;
+}
+
+char* strcat(char* dst, const char* src)
+{
+    char* original_dst = dst;
+    
+    // 找到dst的末尾
+    while (*dst != '\0') {
+        dst++;
+    }
+    
+    // 复制src到dst末尾
+    while ((*dst++ = *src++) != '\0')
+        ;
+    
+    return original_dst;
 }

@@ -37,4 +37,20 @@
 // 其他
 #define SYS_getppid      28  // ✅ 移到这里
 
+// ✅ 新增：扩展的文件系统调用
+#define SYS_lseek        29
+#define SYS_stat         30
+#define SYS_fstat        31
+#define SYS_mkdir        32
+#define SYS_chdir        33
+#define SYS_getcwd       34
+#define SYS_link         35
+#define SYS_unlink       36
+#define SYS_dup          37
+#define SYS_dup2         38
+
+// ✅ 可选：符号链接支持
+#define SYS_symlink      39
+#define SYS_readlink     40
+
 #endif

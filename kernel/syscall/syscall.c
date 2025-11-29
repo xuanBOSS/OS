@@ -32,6 +32,17 @@ static uint64 (*syscalls[])(void) = {
     [SYS_close]         sys_close,
     [SYS_read]          sys_read,
     [SYS_write]         sys_write,
+
+    [SYS_lseek]         sys_lseek,
+    [SYS_stat]          sys_stat,
+    [SYS_fstat]         sys_fstat,
+    [SYS_mkdir]         sys_mkdir,
+    [SYS_chdir]         sys_chdir,
+    [SYS_getcwd]        sys_getcwd,
+    [SYS_link]          sys_link,
+    [SYS_unlink]        sys_unlink,
+    [SYS_dup]           sys_dup,
+    [SYS_dup2]          sys_dup2,
     
     // 内存管理类
     [SYS_sbrk]          sys_sbrk,

@@ -17,4 +17,18 @@ void spinlock_acquire(spinlock_t* lk);
 void spinlock_release(spinlock_t* lk);
 bool spinlock_holding(spinlock_t* lk); 
 
+// 睡眠锁（用于文件系统）
+typedef struct sleeplock {
+    spinlock_t lk;      // 保护睡眠锁的自旋锁
+    int locked;         // 是否被锁定
+    char *name;         // 锁的名称
+    int pid;            // 持有锁的进程ID
+} sleeplock_t;
+
+// 睡眠锁函数声明
+void sleeplock_init(sleeplock_t *lk, char *name);
+void sleeplock_acquire(sleeplock_t *lk);
+void sleeplock_release(sleeplock_t *lk);
+int  sleeplock_holding(sleeplock_t *lk);
+
 #endif

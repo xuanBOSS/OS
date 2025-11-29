@@ -12,6 +12,10 @@
 #define UART_BASE  0x10000000ul
 #define UART_IRQ   10
 
+// VirtIO 磁盘相关
+#define VIRTIO_BASE 0x10001000ul
+#define VIRTIO_IRQ  1
+
 // platform-level interrupt controller(PLIC)
 #define PLIC_BASE 0x0c000000ul
 #define PLIC_PRIORITY(id) (PLIC_BASE + (id) * 4)
@@ -29,7 +33,9 @@
 #define CLINT_MTIMECMP(hartid) (CLINT_BASE + 0x4000 + 8 * (hartid))
 #define CLINT_MTIME (CLINT_BASE + 0xBFF8)
 
-// === Lab4 用户态虚拟地址布局 ===
+// 文件系统相关常量
+#define BLOCK_SIZE 1024  // 块大小（1KB）
+
 // 用户态虚拟地址空间布局（Sv39）
 #define USER_VA_MAX     (1UL << 38)         // 256GB用户地址空间
 
@@ -47,13 +53,17 @@
 #define USER_HEAP_BASE  0x10000             // 用户堆起始地址（64KB处）
 #define USER_STACK_TOP  0x3000000           // 用户栈顶（48MB处，给堆更多空间）
 
-// ✅ 新增：用户内存映射区域定义
+// 用户内存映射区域定义
 #define USER_MMAP_BASE  0x40000000UL        // 用户mmap区域起始地址（1GB处）
 #define USER_MMAP_END   0x80000000UL        // 用户mmap区域结束地址（2GB处）
 
-// ✅ 新增：页面对齐宏
+// 页面对齐宏
 #define PGROUNDUP(sz)   (((sz)+PGSIZE-1) & ~(PGSIZE-1))
 #define PGROUNDDOWN(a)  (((a)) & ~(PGSIZE-1))
+
+// 地址对齐通用宏（virtio.c 中使用）
+#define ALIGN_DOWN(addr, align) ((addr) & ~((align) - 1))
+#define ALIGN_UP(addr, align)   (((addr) + (align) - 1) & ~((align) - 1))
 
 // 内核虚拟地址布局
 #define KERNBASE        0x80000000UL        // 内核基地址
@@ -63,6 +73,7 @@
 #define UART_VA         UART_BASE           // UART虚拟地址（恒等映射）
 #define PLIC_VA         PLIC_BASE           // PLIC虚拟地址（恒等映射）
 #define CLINT_VA        CLINT_BASE          // CLINT虚拟地址（恒等映射）
+#define VIRTIO_VA       VIRTIO_BASE         // VirtIO虚拟地址（恒等映射）
 
 // 页表相关定义
 #define SATP_SV39 (8L << 60)
@@ -71,7 +82,7 @@
 // 内核栈虚拟地址计算（每个进程有独立的内核栈）
 #define KSTACK(p)       (TRAMPOLINE_VA - 3*PGSIZE - (p)*2*PGSIZE)
 
-// ✅ 重要：添加来自 kernel.ld 的外部符号声明
+// 添加来自 kernel.ld 的外部符号声明
 extern char etext[];        // 内核代码段结束地址
 extern char trampoline[];   // trampoline 页地址
 extern char KERNEL_DATA[];  // 内核数据段起始地址

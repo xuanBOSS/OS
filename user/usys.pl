@@ -43,6 +43,24 @@ print "# Memory management syscalls\n";
 entry("sbrk", "27");     # SYS_sbrk
 
 print "# Other syscalls\n";
-entry("getppid", "28");
+entry("getppid", "28");  # SYS_getppid
+
+# 扩展的文件系统调用 (29-40)
+print "# Extended file system syscalls\n";
+entry("lseek", "29");    # SYS_lseek
+entry("stat", "30");     # SYS_stat
+entry("fstat", "31");    # SYS_fstat
+entry("mkdir", "32");    # SYS_mkdir
+entry("chdir", "33");    # SYS_chdir
+entry("getcwd", "34");   # SYS_getcwd
+entry("link", "35");     # SYS_link
+entry("unlink", "36");   # SYS_unlink
+entry("dup", "37");      # SYS_dup
+entry("dup2", "38");     # SYS_dup2
+
+# 符号链接支持
+print "# Symbolic link syscalls (optional)\n";
+entry("symlink", "39");  # SYS_symlink
+entry("readlink", "40"); # SYS_readlink
 
 print "# End of generated stubs\n";

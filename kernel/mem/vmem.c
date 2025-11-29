@@ -3,6 +3,7 @@
 #include "mem/str.h"
 #include "lib/print.h"
 
+extern pagetable_t kernel_pagetable;
 /** 
  *创建空的页表
  *@return 新的页表，失败返回NULL
@@ -203,6 +204,11 @@ void vm_print(pagetable_t pt)
 // ✅ 新增：老师代码兼容函数
 pte_t* vm_getpte(pgtbl_t pgtbl, uint64 va, bool alloc)
 {
+    // ✅ 如果传入 NULL，自动使用内核页表
+    if (pgtbl == NULL) {
+        pgtbl = kernel_pagetable;
+    }
+    
     if (alloc) {
         return walk_create(pgtbl, va);
     } else {

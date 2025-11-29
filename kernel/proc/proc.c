@@ -11,6 +11,7 @@
 #include "riscv.h"
 #include "common.h"
 #include "fs/file.h"
+#include "fs/inode.h"
 
 #define USE_SIMPLE_TEST       // 简单测试（两次fork）
 //#define USE_INITCODE          // 基础测试（一次fork）- 默认
@@ -81,6 +82,8 @@ void proc_init(void) {
         for (int j = 0; j < NOFILE; j++) {
             proc_table[i].ofile[j] = NULL;
         }
+
+         proc_table[i].cwd = NULL;
     }
     
     // ✅ 修复：先清零，再初始化锁和字段
@@ -98,6 +101,11 @@ void proc_init(void) {
     for (int i = 0; i < NOFILE; i++) {
         proczero.ofile[i] = NULL;
     }
+
+    proczero.cwd = inode_alloc(INODE_ROOT);
+    if (!proczero.cwd) {
+        panic("proc_init: failed to allocate root inode for proczero");
+    }
     
     printf("Process management system initialized\n");
     printf("Next available PID: %d\n", next_pid);
@@ -113,7 +121,6 @@ static int alloc_pid(void) {
     
     // 简单的PID分配策略：线性递增
     if (next_pid >= 32767) {  // 避免PID过大
-        printf("alloc_pid: PID space exhausted\n");
         spinlock_release(&pid_lock);
         return -1;
     }
@@ -121,8 +128,6 @@ static int alloc_pid(void) {
     next_pid++;
     
     spinlock_release(&pid_lock);
-    
-    printf("alloc_pid: allocated PID=%d\n", pid);
     return pid;
 }
 
@@ -138,8 +143,6 @@ static void free_pid(int pid) {
 
 // ===== proc_alloc() 函数 =====
 proc_t* proc_alloc(void) {
-    printf("proc_alloc: allocating new process\n");
-    
     spinlock_acquire(&proc_table_lock);
     
     // 寻找空闲进程槽
@@ -155,19 +158,15 @@ proc_t* proc_alloc(void) {
     spinlock_release(&proc_table_lock);
     
     if (!p) {
-        printf("proc_alloc: no free process slots\n");
         return NULL;
     }
     
     // 分配PID
     p->pid = alloc_pid();
     if (p->pid < 0) {
-        printf("proc_alloc: failed to allocate PID\n");
         p->state = PROC_UNUSED;
         return NULL;
     }
-    
-    printf("proc_alloc: allocated PID=%d\n", p->pid);
     
     // 设置基本信息
     p->privilege_level = PRIVILEGE_USER;
@@ -176,37 +175,38 @@ proc_t* proc_alloc(void) {
     // 分配内核栈
     void* kstack_page = pmem_alloc(true);  // 分配内核页
     if (!kstack_page) {
-        printf("proc_alloc: failed to allocate kernel stack\n");
         free_pid(p->pid);
         p->state = PROC_UNUSED;
         return NULL;
     }
     p->kstack = (uint64)kstack_page;  // 栈底地址
-    printf("proc_alloc: allocated kernel stack at 0x%lx (bottom)\n", p->kstack);
     
     // 分配trapframe
     p->tf = (trapframe_t*)pmem_alloc(false);  // ✅ 使用用户页面
     if (!p->tf) {
-        printf("proc_alloc: failed to allocate trapframe\n");
         pmem_free((uint64)kstack_page, true);
         free_pid(p->pid);
         p->state = PROC_UNUSED;
         return NULL;
     }
     memset(p->tf, 0, sizeof(trapframe_t));
-    printf("proc_alloc: allocated trapframe at 0x%lx\n", (uint64)p->tf);
+
+    extern pagetable_t kernel_pagetable;
+    p->tf->kernel_satp = MAKE_SATP(kernel_pagetable);
+    p->tf->kernel_sp = p->kstack + PGSIZE;
+    extern void trap_user_handler(void);
+    p->tf->kernel_trap = (uint64)trap_user_handler;
+    p->tf->kernel_hartid = r_tp();  // ✅ 设置 CPU ID
     
     // 创建用户页表
     p->pgtbl = proc_pgtbl_init((uint64)p->tf);
     if (!p->pgtbl) {
-        printf("proc_alloc: failed to create user page table\n");
         pmem_free((uint64)p->tf, false);
         pmem_free((uint64)kstack_page, true);
         free_pid(p->pid);
         p->state = PROC_UNUSED;
         return NULL;
     }
-    printf("proc_alloc: created user page table at 0x%lx\n", (uint64)p->pgtbl);
     
     // 初始化其他字段
     p->parent = NULL;
@@ -235,8 +235,6 @@ proc_t* proc_alloc(void) {
     p->pending_signals = 0;
     p->signal_mask = 0;
     
-    printf("proc_alloc: successfully allocated process PID=%d\n", p->pid);
-    printf("proc_alloc: initialized parent pointer to 0x%lx\n", (uint64)p->parent);
     
     return p;
 }
@@ -244,15 +242,11 @@ proc_t* proc_alloc(void) {
 // ===== proc_free() 函数 =====
 void proc_free(proc_t* p) {
     if (!p) {
-        printf("proc_free: null pointer\n");
         return;
     }
     
-    printf("proc_free: freeing process PID=%d (%s)\n", p->pid, p->name);
-    
     // ✅ 1. 释放用户页表和相关内存
     if (p->pgtbl && p->pgtbl != NULL) {
-        printf("proc_free: freeing user page table and memory\n");
         
         // 释放用户内存页面
         proc_free_memory(p);
@@ -264,32 +258,27 @@ void proc_free(proc_t* p) {
     
     // ✅ 2. 释放trapframe
     if (p->tf) {
-        printf("proc_free: freeing trapframe\n");
         pmem_free((uint64)p->tf, false);  // trapframe 使用用户页面
         p->tf = NULL;
     }
     
     // ✅ 3. 释放内核栈
     if (p->kstack && p->kstack != 0) {
-        printf("proc_free: freeing kernel stack\n");
         pmem_free(p->kstack, true);  // ✅ 修复：直接释放栈底地址
         p->kstack = 0;
     }
     
     // ✅ 4. 关闭所有文件描述符
-    printf("proc_free: closing file descriptors\n");
     for (int i = 0; i < NOFILE; i++) {
         if (p->ofile[i]) {
-            printf("proc_free: closing fd %d\n", i);
-            fileclose(p->ofile[i]);  // ✅ 实现：关闭文件，减少引用计数
+            file_close(p->ofile[i]);  // ✅ 实现：关闭文件，减少引用计数
             p->ofile[i] = NULL;
         }
     }
     
     // ✅ 5. 释放当前工作目录
     if (p->cwd) {
-        printf("proc_free: releasing current working directory\n");
-        iput(p->cwd);  // ✅ 实现：释放inode引用
+        inode_free(p->cwd);  // ✅ 实现：释放inode引用
         p->cwd = NULL;
     }
     
@@ -323,31 +312,14 @@ void proc_free(proc_t* p) {
     // 清空信号字段
     p->pending_signals = 0;
     p->signal_mask = 0;
-    
-    printf("proc_free: process freed successfully\n");
 }
 
 void debug_page_table_mapping(pgtbl_t pgtbl, uint64 va) {
-    printf("Debug mapping for VA=0x%lx:\n", va);
-    
-    pte_t *pte = walk_lookup(pgtbl, va);
-    if (pte && (*pte & PTE_V)) {
-        uint64 pa = PTE_TO_PA(*pte);
-        printf("  Mapped to PA=0x%lx\n", pa);
-        printf("  Flags: R=%d W=%d X=%d U=%d\n",
-               (*pte & PTE_R) ? 1 : 0,
-               (*pte & PTE_W) ? 1 : 0,
-               (*pte & PTE_X) ? 1 : 0,
-               (*pte & PTE_U) ? 1 : 0);
-    } else {
-        printf("  Not mapped!\n");
-    }
+    // 调试函数，已禁用输出
 }
 
 // ===== 创建用户页表 =====
 pgtbl_t proc_pgtbl_init(uint64 trapframe_pa) {
-    printf("Creating user page table...\n");
-    
     extern pagetable_t kernel_pagetable;
     
     pgtbl_t pgtbl = create_pagetable();
@@ -361,19 +333,12 @@ pgtbl_t proc_pgtbl_init(uint64 trapframe_pa) {
     
     // ✅ 只复制内核高地址映射（索引 256-511）
     // 但是跳过 TRAMPOLINE/TRAPFRAME 所在的索引
-    printf("Copying kernel mappings (high half)...\n");
-    
-    // 计算 TRAMPOLINE 和 TRAPFRAME 的 Level-2 索引
+    // 计算 TRAMPOLINE 的 Level-2 索引（TRAPFRAME 在同一索引下）
     uint64 trampoline_idx = (TRAMPOLINE >> 30) & 0x1FF;
-    uint64 trapframe_idx = (TRAPFRAME >> 30) & 0x1FF;
-    
-    printf("TRAMPOLINE L2 index: %ld, TRAPFRAME L2 index: %ld\n", 
-           trampoline_idx, trapframe_idx);
     
     for (int i = 256; i < 512; i++) {
         // ✅ 跳过 TRAMPOLINE/TRAPFRAME 的索引，不复制
         if (i == trampoline_idx) {
-            printf("Skipping index %d (TRAMPOLINE/TRAPFRAME)\n", i);
             continue;
         }
         
@@ -386,24 +351,16 @@ pgtbl_t proc_pgtbl_init(uint64 trapframe_pa) {
     extern char trampoline[];
     uint64 trampoline_pa = (uint64)trampoline;
     
-    printf("Mapping trampoline: va=0x%lx -> pa=0x%lx\n", TRAMPOLINE, trampoline_pa);
-    
     if (map_page(pgtbl, TRAMPOLINE, trampoline_pa, PTE_R | PTE_X) != 0) {
-        printf("Failed to map trampoline\n");
         destroy_pagetable(pgtbl);
         return 0;
     }
     
     // ✅ 手动映射 TRAPFRAME（使用传入的物理地址）
-    printf("Mapping trapframe: va=0x%lx -> pa=0x%lx\n", TRAPFRAME, trapframe_pa);
-    
     if (map_page(pgtbl, TRAPFRAME, trapframe_pa, PTE_R | PTE_W) != 0) {
-        printf("Failed to map trapframe\n");
         destroy_pagetable(pgtbl);
         return 0;
     }
-    
-    printf("User page table created successfully\n");
 
     debug_page_table_mapping(pgtbl, TRAMPOLINE);
     debug_page_table_mapping(pgtbl, TRAPFRAME);
@@ -425,42 +382,33 @@ void proc_make_first(){
 
     initproc = p;
 
-    printf("Process name set to: %s (PID=%d)\n", p->name, p->pid);
-
-    printf("Using pre-allocated resources:\n");
-    printf("  Trapframe: 0x%lx\n", (uint64)p->tf);
-    printf("  Kernel stack: 0x%lx\n", p->kstack);
-    printf("  Page table: 0x%lx\n", (uint64)p->pgtbl);
-    
     // === 映射内核栈到内核页表 ===
     extern pagetable_t kernel_pagetable;
     uint64 kstack_va = KSTACK(0);
     uint64 kstack_pa = p->kstack;  // 物理地址是栈底
     
-    printf("Mapping kernel stack in kernel page table:\n");
-    printf("  VA: 0x%lx -> PA: 0x%lx\n", kstack_va, kstack_pa);
-    
     if (map_page(kernel_pagetable, kstack_va, kstack_pa, PTE_R | PTE_W) != 0) {
         panic("failed to map kernel stack");
     }
-    printf("Kernel stack mapped successfully\n");
     
     // === 6. 加载用户程序 ===
     uint64 code_va = 0x1000;
 
     //使用新的宏定义
     uint32 program_size = CURRENT_PROGRAM_LEN;
-    printf("Program size: %d bytes, pages needed: ", program_size);
-
     uint32 pages_needed = (program_size + PGSIZE - 1) / PGSIZE;  // 向上取整
-    printf("%d\n", pages_needed);
+    
+    // ✅ 确保至少映射 4 页（到 0x4000），以覆盖 .bss 段中的全局变量（如 errno）
+    // errno 在 0x4000，需要第 4 页（0x4000-0x4fff）
+    if (pages_needed < 4) {
+        pages_needed = 4;
+    }
 
     //分配多个页面
     for (uint32 i = 0; i < pages_needed; i++) {
         uint64 code_pa = (uint64)pmem_alloc(false);
         if (!code_pa) panic("failed to allocate code page");
         
-        printf("Loading program page %d to PA: 0x%lx\n", i, code_pa);
         memset((void*)code_pa, 0, PGSIZE);  // 确保整页都清零
         
         // 复制程序数据到这个页面
@@ -474,12 +422,6 @@ void proc_make_first(){
             
             // 使用新的宏定义
             memcpy((void*)code_pa, CURRENT_PROGRAM + offset, copy_size);
-            printf("Copied %d bytes to page %d (offset %d)\n", copy_size, i, offset);
-        }
-        
-        // 对于第2页，确保剩余部分可以用作数据段
-        if (i == 1) {
-            printf("Page 1 will serve as code+data segment\n");
         }
         
         asm volatile("fence" ::: "memory");
@@ -487,32 +429,22 @@ void proc_make_first(){
         
         uint64 page_va = code_va + i * PGSIZE;
         uint64 pte_flags;
-        if (i == 0) {
-            pte_flags = PTE_R | PTE_X | PTE_U;  // 第一页：只读+可执行
-        } else {
-            pte_flags = PTE_R | PTE_W | PTE_X | PTE_U;  // 后续页：可读写执行
-        }
+        // ✅ 所有页面都需要写权限，因为 .data 和 .bss 段可能在任何页面中
+        pte_flags = PTE_R | PTE_W | PTE_X | PTE_U;  // 可读写执行
         
         if (map_page(p->pgtbl, page_va, code_pa, pte_flags) != 0) {
             panic("failed to map user code page");
         }
-        printf("User code page %d mapped: VA=0x%lx -> PA=0x%lx (flags=0x%lx)\n", 
-               i, page_va, code_pa, pte_flags);
     }
 
     // 设置堆起始地址在代码页之后
     p->heap_top = code_va + pages_needed * PGSIZE;
-    printf("Heap initialized at: 0x%lx\n", p->heap_top);
-    printf("Total program loaded: %d bytes in %d pages\n", program_size, pages_needed);
 
     // === 7. 用户栈映射 ===
     // 栈地址要避开堆空间
     uint64 code_end_va = 0x1000 + pages_needed * PGSIZE;  // 代码结束地址
     uint64 heap_start = code_end_va;                       // 堆紧跟代码
     uint64 ustack_va = 0x10000;                           // 栈放在更远的地方（64KB处）
-
-    printf("Code ends at: 0x%lx, heap starts at: 0x%lx, stack at: 0x%lx\n", 
-           code_end_va, heap_start, ustack_va);
 
     uint64 ustack_pa = (uint64)pmem_alloc(false);
     if (!ustack_pa) panic("failed to allocate user stack");
@@ -522,27 +454,28 @@ void proc_make_first(){
     if (map_page(p->pgtbl, ustack_va, ustack_pa, PTE_R | PTE_W | PTE_U) != 0) {
         panic("failed to map user stack");
     }
-    printf("User stack mapped: VA=0x%lx -> PA=0x%lx\n", ustack_va, ustack_pa);
 
     // === 8. 配置 trapframe ===
     p->tf->kernel_satp = MAKE_SATP(kernel_pagetable);
     p->tf->kernel_sp = p->kstack + PGSIZE; 
     p->tf->kernel_trap = (uint64)trap_user_handler;
+    p->tf->kernel_hartid = r_tp(); 
 
-    p->tf->epc = 0x1000;
+    // ✅ 设置正确的入口点：从 ELF 文件读取，_start 在 0x10da
+    // 但为了兼容性，我们检查是否有 _start 符号，如果没有则使用 0x1000
+    p->tf->epc = 0x10da;  // _start 函数的实际地址
     p->tf->sp = ustack_va + PGSIZE - 8;  // 使用新的栈地址
 
     // 设置正确的堆起始地址
     p->heap_top = heap_start;
 
-    printf("Trapframe configured:\n");
-    printf("  epc: 0x%lx (user program entry)\n", p->tf->epc);
-    printf("  sp: 0x%lx (user stack top)\n", p->tf->sp);
-    printf("  heap_top: 0x%lx\n", p->heap_top);
-
     // 清零所有用户寄存器
     p->tf->ra = 0;
-    p->tf->gp = 0;
+    // ✅ 设置 gp (global pointer) 寄存器
+    // gp 用于快速访问全局变量，通常指向 .data 段的中间位置
+    // 由于 .data 段在 .text 和 .rodata 之后，我们估算一个合理的位置
+    // 设置为程序起始地址 + 4KB，这样可以覆盖大部分全局变量访问
+    p->tf->gp = code_va + PGSIZE;  // 设置为 0x2000
     p->tf->tp = 0;
     p->tf->t0 = 0;
     p->tf->t1 = 0;
@@ -573,20 +506,15 @@ void proc_make_first(){
     p->tf->t6 = 0;
 
     // === 9. 初始化文件描述符 ===
-    printf("Initializing standard file descriptors...\n");
     init_process_standard_files(p);
+
+    p->cwd = inode_alloc(INODE_ROOT);
+    if (!p->cwd) {
+        panic("proc_make_first: failed to allocate root inode");
+    }
 
     // === 10. 切换到用户模式 ===
     p->state = PROC_RUNNABLE;
-
-    printf("About to switch to user program at 0x%lx\n", p->tf->epc);
-    
-    // 添加更多调试信息
-    printf("Debug: User program details:\n");
-    printf("  EPC: 0x%lx\n", p->tf->epc);
-    printf("  SP: 0x%lx\n", p->tf->sp);
-    printf("  SATP: 0x%lx\n", p->tf->kernel_satp);
-    printf("  Page table: 0x%lx\n", (uint64)p->pgtbl);
     
     printf("Starting scheduler...\n");
     
@@ -607,52 +535,40 @@ void init_process_standard_files(proc_t* p)
     
     // 正确初始化标准文件描述符
     for (int fd = 0; fd < 3; fd++) {
-        struct file *f = filealloc();
+        struct file *f = file_alloc();
         if (!f) {
             printf("ERROR: Failed to allocate file for fd %d\n", fd);
             panic("Cannot initialize standard files");
         }
         
         // 确保所有字段都正确设置
-        f->type = FD_DEVICE_E;
-        f->major = CONSOLE;
+        f->type = FD_DEVICE;
+        f->major = DEV_CONSOLE;
         f->readable = (fd == 0) ? 1 : 0;  // stdin 可读
         f->writable = (fd == 0) ? 0 : 1;  // stdout/stderr 可写
         f->ref = 1;
-        f->off = 0;  // 设置文件偏移
+        f->offset = 0;  // 设置文件偏移
         
         // 确保设备文件有正确的操作函数
         // 这通常在设备初始化时设置，但我们需要确保它存在
         
         p->ofile[fd] = f;
-        printf("✅ Initialized fd %d: type=%d, major=%d, readable=%d, writable=%d, ref=%d\n", 
-               fd, f->type, f->major, f->readable, f->writable, f->ref);
     }
-    
-    printf("Standard file descriptors initialized successfully\n");
 }
 
 // 进程管理函数
 int proc_copy_memory(proc_t *parent, proc_t *child) {
-    printf("proc_copy_memory: copying memory from PID=%d to PID=%d\n", 
-           parent->pid, child->pid);
-    
     // 1. 复制代码页（从 0x1000 到 heap_top）
-    printf("proc_copy_memory: copying code pages from 0x%lx to 0x%lx\n", 
-           0x1000UL, parent->heap_top);
-    
     for (uint64 va = 0x1000; va < parent->heap_top; va += PGSIZE) {
         // 获取父进程页面的物理地址
         uint64 parent_pa = va_to_pa(parent->pgtbl, va);
         if (parent_pa == 0) {
-            printf("proc_copy_memory: parent page VA=0x%lx not mapped, skipping\n", va);
             continue;
         }
         
         // 为子进程分配新的物理页
         uint64 child_pa = (uint64)pmem_alloc(false);
         if (!child_pa) {
-            printf("proc_copy_memory: failed to allocate page for VA=0x%lx\n", va);
             return -1;
         }
         
@@ -669,25 +585,18 @@ int proc_copy_memory(proc_t *parent, proc_t *child) {
         
         // 映射到子进程页表
         if (map_page(child->pgtbl, va, child_pa, flags) != 0) {
-            printf("proc_copy_memory: failed to map child page at VA=0x%lx\n", va);
             pmem_free(child_pa, false);
             return -1;
         }
-        
-        printf("proc_copy_memory: copied page VA=0x%lx (parent_pa=0x%lx -> child_pa=0x%lx)\n",
-               va, parent_pa, child_pa);
     }
     
     // 2. 复制用户栈（假设栈在 0x10000）
     uint64 ustack_va = 0x10000;
-    printf("proc_copy_memory: copying user stack at VA=0x%lx\n", ustack_va);
-    
     uint64 parent_pa = va_to_pa(parent->pgtbl, ustack_va);
     if (parent_pa != 0) {
         // 为子进程分配栈页
         uint64 child_pa = (uint64)pmem_alloc(false);
         if (!child_pa) {
-            printf("proc_copy_memory: failed to allocate stack page\n");
             return -1;
         }
         
@@ -696,47 +605,32 @@ int proc_copy_memory(proc_t *parent, proc_t *child) {
         
         // 映射到子进程页表
         if (map_page(child->pgtbl, ustack_va, child_pa, PTE_R | PTE_W | PTE_U) != 0) {
-            printf("proc_copy_memory: failed to map stack page\n");
             pmem_free(child_pa, false);
             return -1;
         }
-        
-        printf("proc_copy_memory: copied stack VA=0x%lx (parent_pa=0x%lx -> child_pa=0x%lx)\n",
-               ustack_va, parent_pa, child_pa);
     }
     
     // 3. 复制元数据
     child->heap_top = parent->heap_top;
     child->ustack_pages = parent->ustack_pages;
     
-    printf("proc_copy_memory: successfully copied all memory\n");
-    printf("  heap_top: 0x%lx\n", child->heap_top);
-    printf("  ustack_pages: %d\n", child->ustack_pages);
-    
     return 0;
 }
 
 void proc_copy_files(proc_t *parent, proc_t *child) {
-    printf("proc_copy_files: copying files from PID=%d to PID=%d\n", 
-           parent->pid, child->pid);
-    
     for (int i = 0; i < NOFILE; i++) {
         if (parent->ofile[i]) {
-            child->ofile[i] = filedup(parent->ofile[i]);
-            printf("proc_copy_files: copied fd %d\n", i);
+            child->ofile[i] = file_dup(parent->ofile[i]);
         }
     }
     
     if (parent->cwd) {
-        child->cwd = idup(parent->cwd);
+        child->cwd = inode_dup(parent->cwd);
     }
 }
 
 void proc_free_memory(proc_t *p) {
-    printf("proc_free_memory: freeing memory for PID=%d\n", p->pid);
-    
     if (!p->pgtbl) {
-        printf("proc_free_memory: no page table to free\n");
         return;
     }
     
@@ -745,16 +639,10 @@ void proc_free_memory(proc_t *p) {
     uint64 code_start = 0x1000;
     uint64 code_end = p->heap_top;
     
-    printf("proc_free_memory: freeing code pages from 0x%lx to 0x%lx\n", 
-           code_start, code_end);
-    
     for (uint64 va = code_start; va < code_end; va += PGSIZE) {
         uint64 pa = va_to_pa(p->pgtbl, va);  // ✅ 使用现有函数
         if (pa != 0) {
-            printf("proc_free_memory: freeing page VA=0x%lx, PA=0x%lx\n", va, pa);
             pmem_free(pa, false);  // 释放用户页面
-            
-            // ✅ 使用现有的 unmap_page 函数
             unmap_page(p->pgtbl, va);
         }
     }
@@ -763,13 +651,9 @@ void proc_free_memory(proc_t *p) {
     uint64 ustack_va = 0x10000;  // 根据你的代码中的栈地址
     uint64 pa = va_to_pa(p->pgtbl, ustack_va);  // ✅ 使用现有函数
     if (pa != 0) {
-        printf("proc_free_memory: freeing user stack VA=0x%lx, PA=0x%lx\n", 
-               ustack_va, pa);
         pmem_free(pa, false);
         unmap_page(p->pgtbl, ustack_va);  // ✅ 使用现有函数
     }
-    
-    printf("proc_free_memory: memory freed\n");
 }
 
 proc_t* find_child(proc_t *parent, int pid) {
@@ -784,127 +668,103 @@ proc_t* find_child(proc_t *parent, int pid) {
 // proc.c - 修改 wakeup 函数，添加死锁检测
 void wakeup(void *chan) {
     proc_t *p;
+    proc_t *current = myproc();  // 可能为 NULL（在中断上下文中）
+    int woken = 0;
+    
+    printf("wakeup: called for channel 0x%lx\n", (uint64)chan);
     
     for (p = proc_table; p < &proc_table[MAX_PROC]; p++) {
-        if (p != myproc()) {
-            spinlock_acquire(&p->lock);
-            if (p->state == PROC_SLEEPING && p->wait_chan == chan) {
-                p->state = PROC_RUNNABLE;
-            }
-            spinlock_release(&p->lock);
+        // ✅ 修复：只有当 p 是当前运行的进程时才跳过
+        // 在中断上下文中，current 可能为 NULL，所以不应该跳过任何进程
+        // 注意：如果当前进程是 sleep 状态（不应该发生），我们也不应该跳过它
+        if (current != NULL && p == current && p->state == PROC_RUNNING) {
+            continue;  // 跳过正在运行的当前进程
         }
+        
+        spinlock_acquire(&p->lock);
+        if (p->state == PROC_SLEEPING && p->wait_chan == chan) {
+            printf("wakeup: waking up process PID=%d on channel 0x%lx\n", p->pid, (uint64)chan);
+            p->state = PROC_RUNNABLE;
+            woken++;
+        }
+        spinlock_release(&p->lock);
+    }
+    
+    // 调试输出
+    if (woken > 0) {
+        printf("wakeup: woken %d process(es) on channel 0x%lx\n", woken, (uint64)chan);
+    } else {
+        printf("wakeup: no processes found sleeping on channel 0x%lx\n", (uint64)chan);
     }
 }
 
-__attribute__((noinline))
 void sched(void) {
-    proc_t *p = myproc();  // ✅ 在 swtch 之前调用
+    proc_t *p = myproc();
     
     if (!p) panic("sched: no current process");
     if (!spinlock_holding(&p->lock)) panic("sched: not holding lock");
     if (p->state == PROC_RUNNING) panic("sched: still running");
     
-    cpu_t *cpu = mycpu();  // ✅ 在 swtch 之前调用
+    cpu_t *cpu = mycpu();
     int intena = cpu->intena;
-    int pid = p->pid;  // ✅ 保存 PID 到局部变量
-    
-    printf("sched: [BEFORE SWTCH] PID=%d\n", pid);
+    // ✅ 在切换前确保中断可以在调度器中打开
+    // 调度器会调用 intr_on()
     
     swtch(&p->ctx, &cpu->ctx);
     
-    // ✅ swtch 返回后，不要调用 myproc() 或 mycpu()
-    // 使用之前保存的指针和变量
-    printf("sched: [AFTER SWTCH] PID=%d RETURNED!\n", pid);  // ✅ 使用局部变量
-    
-    cpu->intena = intena;  // ✅ 使用之前保存的指针
-    
-    printf("sched: [COMPLETE] PID=%d\n", pid);  // ✅ 使用局部变量
+    cpu->intena = intena;
 }
 
-__attribute__((noinline))
-void sleep(void *chan, struct spinlock *lk) {
+void sleep(void *chan, struct spinlock *lk)
+{
     proc_t *p = myproc();
 
-    // ✅ 检查栈指针
-    uint64 current_sp;
-    asm volatile("mv %0, sp" : "=r"(current_sp));
-    
-    uint64 expected_sp_min = p->kstack;
-    uint64 expected_sp_max = p->kstack + PGSIZE;
-    
-    printf("sleep: [ENTRY] PID=%d, sp=0x%lx\n", p->pid, current_sp);
-    printf("sleep: expected sp range: 0x%lx - 0x%lx\n", 
-           expected_sp_min, expected_sp_max);
-    
-    if (current_sp < expected_sp_min || current_sp > expected_sp_max) {
-        printf("ERROR: stack pointer out of range!\n");
-        printf("  Fixing: setting sp to 0x%lx\n", expected_sp_max - 16);
-        
-        // 强制修正栈指针
-        asm volatile("mv sp, %0" :: "r"(expected_sp_max - 16));
+    if (p == NULL) {
+        panic("sleep called without a process");
     }
     
-    printf("sleep: [START] PID=%d on chan=0x%lx\n", p->pid, (uint64)chan);
-    
+    // 获取进程锁
     spinlock_acquire(&p->lock);
     
+    // 释放条件锁
     if (lk != &p->lock) {
         spinlock_release(lk);
     }
     
+    // 设置睡眠状态
     p->wait_chan = chan;
     p->state = PROC_SLEEPING;
     
-    printf("sleep: [CALLING SCHED]\n");
+    // 调用 sched
     sched();
     
-    printf("sleep: [WOKE UP] - sched() returned!\n");
-    
+    // 被唤醒后
     p->wait_chan = 0;
     
+    // 释放进程锁
+    spinlock_release(&p->lock);
+    
+    // 重新获取条件锁
     if (lk != &p->lock) {
         spinlock_acquire(lk);
     }
-    
-    spinlock_release(&p->lock);
-    
-    printf("sleep: [COMPLETE]\n");
 }
-
 
 // ✅ 添加：释放进程页表的函数
 void proc_freepagetable(pagetable_t pagetable, uint64 sz) {
-    printf("proc_freepagetable: freeing pagetable at 0x%lx (size=0x%lx)\n", 
-           (uint64)pagetable, sz);
-    
     if (!pagetable) {
-        printf("proc_freepagetable: null pagetable\n");
         return;
     }
     
     // 使用现有的 destroy_pagetable 函数
     destroy_pagetable(pagetable);
-    
-    printf("proc_freepagetable: pagetable freed\n");
 }
 
 void forkret(void) {
-    static int first = 1;
     proc_t *p = myproc();
-    
-    printf("forkret: ENTRY - PID=%d\n", p ? p->pid : -1);
     
     // ✅ 释放进程锁（调度器持有）
     spinlock_release(&p->lock);
-    
-    printf("forkret: lock released\n");
-    
-    if (first) {
-        first = 0;
-        printf("forkret: first time initialization\n");
-    }
-    
-    printf("forkret: about to call trap_user_return()\n");
     
     // ✅ 跳转到用户态
     trap_user_return();
@@ -916,97 +776,62 @@ void scheduler(void) {
     cpu_t *c = mycpu();
     c->proc = 0;
     
-    printf("Scheduler started on CPU %d\n", mycpuid());
-    
     for(;;) {
+        // ✅ 1. 在查找进程前打开中断（允许接收中断）
         intr_on();
         
         int found = 0;
-        int total_procs = 0;     // ✅ 总进程数
-        int zombie_procs = 0;    // ✅ 僵尸进程数
         
         for (proc_t *p = proc_table; p < &proc_table[MAX_PROC]; p++) {
-            spinlock_acquire(&p->lock);
-            
-            // ✅ 统计进程
-            if (p->state != PROC_UNUSED) {
-                total_procs++;
-                if (p->state == PROC_ZOMBIE) {
-                    zombie_procs++;
-                }
-            }
+            spinlock_acquire(&p->lock);  // ← 关闭中断
             
             if (p->state == PROC_RUNNABLE) {
-                printf("Scheduler: found runnable PID=%d (%s)\n", p->pid, p->name);
-                
+                // 初始化上下文（第一次运行）
                 if (p->ctx.sp == 0) {
                     p->ctx.sp = p->kstack + PGSIZE;
                     p->ctx.ra = (uint64)forkret;
-                    printf("Scheduler: FIRST TIME - ctx.ra=0x%lx, ctx.sp=0x%lx\n", 
-                           p->ctx.ra, p->ctx.sp);
-                } else {
-                    printf("Scheduler: RESUMING - ctx.ra=0x%lx, ctx.sp=0x%lx\n", 
-                           p->ctx.ra, p->ctx.sp);
                 }
                 
                 p->state = PROC_RUNNING;
                 c->proc = p;
                 
-                printf("Scheduler: [BEFORE SWTCH] to PID=%d\n", p->pid);
-                printf("  c->ctx.ra = 0x%lx\n", c->ctx.ra);
-                printf("  c->ctx.sp = 0x%lx\n", c->ctx.sp);
-                printf("  p->ctx.ra = 0x%lx\n", p->ctx.ra);
-                printf("  p->ctx.sp = 0x%lx\n", p->ctx.sp);
-                
+                // ✅ 切换到进程（此时持有 p->lock，中断关闭）
                 swtch(&c->ctx, &p->ctx);
                 
-                printf("Scheduler: [AFTER SWTCH] from PID=%d\n", p->pid);
-                
+                // ✅ 进程返回后，仍然持有 p->lock，中断关闭
                 c->proc = 0;
                 found = 1;
             }
             
-            spinlock_release(&p->lock);
+            spinlock_release(&p->lock);  // ← 打开中断
         }
         
-        // ✅ 检查是否所有进程都是僵尸
-        if (found == 0 && total_procs > 0 && total_procs == zombie_procs) {
-            printf("\n");
-            printf("========================================\n");
-            printf("✅ All processes have completed!\n");
-            printf("========================================\n");
-            printf("Total processes: %d (all zombies)\n", total_procs);
-            printf("\n");
-            
-            // 打印最终统计
-            printf("=== Final System State ===\n");
+        // ✅ 2. 如果没有找到进程，检查是否所有进程都已退出
+        if (found == 0) {
+            // 检查是否所有进程都已退出（没有可运行进程）
+            int all_exited = 1;
             for (proc_t *p = proc_table; p < &proc_table[MAX_PROC]; p++) {
-                if (p->state != PROC_UNUSED) {
-                    printf("  PID=%d (%s): state=%d", p->pid, p->name, p->state);
-                    if (p->state == PROC_ZOMBIE) {
-                        printf(" [ZOMBIE, exit_code=%d]", p->exit_code);
-                    }
-                    printf("\n");
+                if (p->state != PROC_UNUSED && p->state != PROC_ZOMBIE) {
+                    all_exited = 0;
+                    break;
                 }
             }
-            printf("==========================\n");
-            printf("\n");
             
-            // ✅ 关闭 QEMU
-            printf("Shutting down QEMU...\n");
-            volatile uint32_t *test_dev = (uint32_t*)0x100000;
-            *test_dev = 0x5555;  // QEMU shutdown code
-            
-            // 如果关闭失败，无限循环
-            printf("Shutdown failed, entering infinite loop\n");
-            for(;;) {
-                asm volatile("wfi");
+            if (all_exited) {
+                // 所有进程都已退出，系统停止
+                printf("\n=== All processes exited ===\n");
+                printf("System halted.\n");
+                while(1) {
+                    asm volatile("wfi");
+                }
             }
-        }
-        
-        if (found == 0) {
-            intr_on();
+            
+            // WFI 指令：等待中断
+            // 中断返回后会继续执行下一条指令（循环继续）
             asm volatile("wfi");
+            
+            // ✅ 中断返回后，继续循环，重新检查进程状态
+            // 不需要额外的代码，循环会自动继续
         }
     }
 }
@@ -1015,16 +840,8 @@ void validate_stack_pointer(proc_t *p) {
     uint64 expected_sp_min = KSTACK(0);
     uint64 expected_sp_max = KSTACK(0) + PGSIZE;
     
-    printf("validate_stack_pointer: PID=%d\n", p->pid);
-    printf("  ctx.sp: 0x%lx\n", p->ctx.sp);
-    printf("  expected range: 0x%lx - 0x%lx\n", expected_sp_min, expected_sp_max);
-    
     if (p->ctx.sp < expected_sp_min || p->ctx.sp > expected_sp_max) {
-        printf("ERROR: stack pointer 0x%lx out of range!\n", p->ctx.sp);
-        printf("  fixing ctx.sp to 0x%lx\n", expected_sp_max);
         p->ctx.sp = expected_sp_max;  // 强制修复
-    } else {
-        printf("✅ stack pointer is valid\n");
     }
 }
 

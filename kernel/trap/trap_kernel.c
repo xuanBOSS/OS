@@ -1,6 +1,8 @@
 #include "lib/print.h"
 #include "dev/timer.h"
 #include "dev/uart.h"
+#include "dev/virtio.h"
+#include "dev/vio.h"
 #include "dev/plic.h"
 #include "trap/trap.h"
 #include "proc/cpu.h"
@@ -66,13 +68,27 @@ void trap_kernel_inithart()
     // 设置内核中断向量
     w_stvec((uint64)kernel_vector);
     
+    printf("CPU %d: stvec=0x%lx\n", cpuid, r_stvec());
+    printf("CPU %d: sie=0x%lx\n", cpuid, r_sie());
     printf("CPU %d: kernel trap initialized\n", cpuid);
 }
 
 // 外设中断处理 (基于PLIC)
 void external_interrupt_handler()
 {
-    printf("External interrupt handled\n");
+    int irq = plic_claim();
+    
+    if (irq == UART_IRQ) {
+        uart_intr();
+    } else if (irq == 1 || irq == 2 || irq == 3 || irq == 8) {
+        virtio_disk_intr();
+    } else {
+        printf("external_interrupt_handler: unhandled irq=%d\n", irq);
+    }
+    
+    if (irq > 0) {
+        plic_complete(irq);
+    }
 }
 
 // 时钟中断处理 (基于CLINT)
@@ -85,14 +101,10 @@ void timer_interrupt_handler()
 // 内核态trap处理的核心逻辑
 void trap_kernel_handler()
 {
-    printf("🎯 ENTERED trap_kernel_handler!\n");
-
-    uint64 sepc = r_sepc();          // 记录了发生异常时的pc值
-    uint64 sstatus = r_sstatus();    // 与特权模式和中断相关的状态信息
-    uint64 scause = r_scause();      // 引发trap的原因
-    uint64 stval = r_stval();        // 发生trap时保存的附加信息
-
-    printf("TRAP DEBUG: scause=0x%lx, sepc=0x%lx\n", scause, sepc);
+    uint64 scause = r_scause();
+    uint64 sepc = r_sepc();
+    uint64 sstatus = r_sstatus();
+    uint64 stval = r_stval();
 
     // 确认trap来自S-mode且此时trap处于关闭状态
     assert(sstatus & SSTATUS_SPP, "trap_kernel_handler: not from s-mode");
@@ -103,17 +115,15 @@ void trap_kernel_handler()
         // 中断处理
         int irq = scause & 0xff;
         
-        printf("Kernel interrupt: irq=%d\n", irq);
-        
         if (irq == 5) {
             // S-mode timer interrupt
             timer_interrupt_handler();
         } else if (irq == 9) {
             // S-mode external interrupt
-            external_interrupt_handler();
+            external_interrupt_handler();  // ← 这里会调用 virtio_disk_intr()
         } else if (irq == 1) {
-            // S-mode software interrupt (from M-mode timer)
-            w_sip(r_sip() & ~SIP_SSIP);  // 清除软件中断标志
+            // S-mode software interrupt
+            w_sip(r_sip() & ~SIP_SSIP);
             timer_interrupt_handler();
         } else {
             printf("CPU %d: Unknown interrupt %d\n", mycpuid(), irq);
@@ -121,7 +131,6 @@ void trap_kernel_handler()
     } else {
         // 异常处理
         int trap_id = scause & 0xf;
-        printf("EXCEPTION: trap_id=%d\n", trap_id);
         const char *name = (trap_id < 16) ? exception_info[trap_id] : "Unknown";
         
         printf("CPU %d: Exception %d (%s) at PC=0x%lx, stval=0x%lx\n", 
@@ -130,24 +139,22 @@ void trap_kernel_handler()
         switch (trap_id) {
             case 2:  // Illegal instruction
                 printf("Illegal instruction, skipping\n");
-                w_sepc(sepc + 4);  // 跳过指令
+                w_sepc(sepc + 4);
                 break;
                 
             case 3:  // Breakpoint
                 printf("Breakpoint hit, continuing\n");
-                w_sepc(sepc + 4);  // 跳过EBREAK
+                w_sepc(sepc + 4);
                 break;
                 
             case 8:  // Environment call from U-mode
-                // ✅ 修复：用户态系统调用不应该在内核trap处理器中处理
                 printf("❌ ERROR: User mode syscall in kernel trap handler!\n");
-                printf("This should be handled by trap_user_handler instead\n");
                 panic("User syscall in kernel trap handler");
                 break;
                 
             case 9:  // Environment call from S-mode
                 printf("System call from supervisor mode\n");
-                w_sepc(sepc + 4);  // 跳过ecall指令
+                w_sepc(sepc + 4);
                 break;
                 
             default:

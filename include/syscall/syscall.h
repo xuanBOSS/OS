@@ -14,7 +14,7 @@ void arg_str(int n, char* buf, int maxlen);
 
 // 新增：高级参数提取接口
 int get_syscall_arg(int n, long *arg);
-int get_user_string(uint64 user_ptr, char *buf, int max);
+//int get_user_string(uint64 user_ptr, char *buf, int max);
 int get_user_buffer(uint64 user_ptr, void *buf, int size);
 
 #endif

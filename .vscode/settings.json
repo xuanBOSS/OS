@@ -3,6 +3,10 @@
         "stat.h": "c",
         "sysfunc.h": "c",
         "syscall.h": "c",
-        "syscall_error.h": "c"
+        "syscall_error.h": "c",
+        "cpu.h": "c",
+        "bitmap.h": "c",
+        "inode.h": "c",
+        "memlayout.h": "c"
     }
 }

@@ -43,47 +43,47 @@ void debug_mret_failed() {
 void start() {
     printf("M-mode: start() called\n");
 
-    // 🔥 重要：设置 S-mode 异常向量
     extern void simple_trap();
     w_stvec((uint64)simple_trap);
 
-    // 委托中断和异常到S-mode
-    w_medeleg(0x3fff);
-    w_mideleg(0x1666);
+    // ✅ 修复：正确委托中断
+    w_medeleg(0xffff);  // 委托所有异常
+    w_mideleg((1 << 1) | (1 << 5) | (1 << 9));  // 委托 SSIP, STIP, SEIP
     printf("M-mode: delegation configured\n");
 
-    // 允许S-mode接收定时器、软件和外部中断
-    w_sie(SIE_SEIE | SIE_STIE | SIE_SSIE);
+    // ✅ 验证委托
+    uint64 mideleg_val = r_mideleg();
+    printf("M-mode: mideleg=0x%lx (SEIP=%d)\n", 
+           mideleg_val, !!(mideleg_val & (1 << 9)));
 
-    // 配置物理内存保护允许全部访问
+    // 使能 S-mode 中断
+    w_sie(SIE_SEIE | SIE_STIE | SIE_SSIE);
+    
+    // ✅ 验证
+    uint64 sie_val = r_sie();
+    printf("M-mode: sie=0x%lx\n", sie_val);
+
+    // 配置 PMP
     w_pmpaddr0(0x3fffffffffffffull);
     w_pmpcfg0(0xf);
     printf("M-mode: PMP configured\n");
 
-    // 禁用分页
     w_satp(0);
-
-    // 设定tp寄存器为当前CPU ID
+    
     int id = r_mhartid();
     w_tp(id);
 
-    // 准备mstatus将切换至S态
     uint64 mstatus_val = r_mstatus();
     mstatus_val &= ~MSTATUS_MPP_MASK;
     mstatus_val |= MSTATUS_MPP_S;
     w_mstatus(mstatus_val);
 
-    // 设置mepc，mret后跳转到smode_test
     extern void smode_test();
     w_mepc((uint64)smode_test);
 
     printf("M-mode: ready to switch to S-mode\n");
-    printf("M-mode: mstatus=0x%lx, mepc=0x%lx\n", r_mstatus(), (uint64)smode_test);
-
-    // 跳转S-mode执行smode_test
     asm volatile("mret");
     
-    // 如果执行到这里说明mret失败
     printf("ERROR: mret failed!\n");
-    while(1) asm volatile("nop");
+    while(1);
 }
